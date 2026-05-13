@@ -1,0 +1,18 @@
+syntax = "proto3";
+package kratos.api;
+
+option go_package = "observable-line/internal/conf;conf";
+
+message Bootstrap {
+  Nacos nacos = 1;
+}
+
+message Nacos {
+  string addr = 1;
+  uint64 port = 2;
+  string username = 3;
+  string password = 4;
+  string namespaceId = 5;
+  string groupId = 6;
+  string dataId = 7;
+}
