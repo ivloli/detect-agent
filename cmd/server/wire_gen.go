@@ -10,6 +10,7 @@ import (
 	"detect-agent/internal/biz"
 	"detect-agent/internal/conf"
 	"detect-agent/internal/grpc_client"
+	"detect-agent/internal/pkg/franz-kafka"
 	"detect-agent/internal/server"
 	"detect-agent/internal/service"
 	"github.com/go-kratos/kratos/v2"
@@ -31,7 +32,13 @@ func wireApp(nacos *conf.Nacos, logger log.Logger) (*kratos.App, func(), error) 
 		return nil, nil, err
 	}
 	httpServer := server.NewHTTPServer(batchService, client, logger)
-	batchDetectHandler := biz.NewBatchDetectHandler(logger)
+	producerConfig := server.NewKafkaProducerConfig()
+	kafkaProducer, err := franz_kafka.NewKafkaProducer(producerConfig, logger)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	batchDetectHandler := biz.NewBatchDetectHandler(logger, kafkaProducer)
 	kafkaServer := server.NewKafkaServer(batchDetectHandler, logger)
 	registrar := server.NewRegistryEngine(nacos, logger)
 	app := newApp(logger, grpcServer, httpServer, kafkaServer, registrar)

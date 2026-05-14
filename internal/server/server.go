@@ -1,6 +1,8 @@
 package server
 
 import (
+	franz_kafka "detect-agent/internal/pkg/franz-kafka"
+
 	"github.com/google/wire"
 )
 
@@ -10,4 +12,6 @@ var ProviderSet = wire.NewSet(
 	NewHTTPServer,
 	NewRegistryEngine,
 	NewDiscoveryEngine,
+	NewKafkaProducerConfig,
+	franz_kafka.ProviderSet,
 )

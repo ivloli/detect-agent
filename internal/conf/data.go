@@ -126,6 +126,8 @@ type KafkaConfig struct {
 	BatchSize int             `json:"batch_size" yaml:"batch_size"`
 	// ChromeInterceptDetectTopic Chrome拦截探测topic
 	ChromeInterceptDetectTopic string `json:"chrome_intercept_detect_topic" yaml:"chrome_intercept_detect_topic"`
+	// ChromeInterceptResultTopic Chrome拦截探测结果topic
+	ChromeInterceptResultTopic string `json:"chrome_intercept_result_topic" yaml:"chrome_intercept_result_topic"`
 }
 
 // KafkaSaslConfig SASL认证配置

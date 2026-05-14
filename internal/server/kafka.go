@@ -31,6 +31,25 @@ func NewKafkaServer(
 	}
 }
 
+// NewKafkaProducerConfig 创建Kafka生产者配置
+func NewKafkaProducerConfig() *franzkafka.ProducerConfig {
+	kafkaConf := conf.GetData().Kafka
+	if kafkaConf == nil {
+		return nil
+	}
+	config := &franzkafka.ProducerConfig{
+		Brokers: kafkaConf.Brokers,
+	}
+	if kafkaConf.Sasl != nil && kafkaConf.Sasl.Enable {
+		config.Sasl = &franzkafka.SaslConfig{
+			Enable:   true,
+			Username: kafkaConf.Sasl.Username,
+			Password: kafkaConf.Sasl.Password,
+		}
+	}
+	return config
+}
+
 // Start 启动Kafka服务器
 func (s *KafkaServer) Start(ctx context.Context) error {
 	s.logger.Info("启动Kafka服务器")
