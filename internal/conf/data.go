@@ -89,11 +89,6 @@ func ConfigChangeCallback(namespace, group, dataId, data string, target interfac
 			}
 		}
 
-		// 打印白名单数量
-		if len(configData.WhiteList) > 0 {
-			log.Printf("   🛡️  路由白名单: %d个路径", len(configData.WhiteList))
-		}
-
 		log.Printf("🎉 [配置更新完成] Nacos配置监听和绑定成功!")
 	}
 	return nil
@@ -103,8 +98,8 @@ func ConfigChangeCallback(namespace, group, dataId, data string, target interfac
 type ConfigData struct {
 	Server Server `json:"server"`
 
-	// WhiteList 路由白名单
-	WhiteList []string `json:"white_list" yaml:"white_list"`
+	// 单种浏览器要维护的实例数
+	BrowserHerdSize int `json:"browser_herd_size" yaml:"browser_herd_size"`
 
 	// GrpcClients 各种gRPC客户端配置
 	GrpcClients *GrpcClients `yaml:"grpc_clients" json:"grpc_clients"`
@@ -124,10 +119,12 @@ type KafkaConfig struct {
 	// TLS配置
 	Tls       *KafkaTlsConfig `json:"tls" yaml:"tls"`
 	BatchSize int             `json:"batch_size" yaml:"batch_size"`
+	// HeartbeatReportTopic 心跳上报topic
+	HeartbeatReportTopic string `json:"heartbeat_report_topic" yaml:"heartbeat_report_topic"`
+	// InterceptDetectResultTopic 拦截探测结果topic
+	InterceptDetectResultTopic string `json:"intercept_detect_result_topic" yaml:"intercept_detect_result_topic"`
 	// ChromeInterceptDetectTopic Chrome拦截探测topic
 	ChromeInterceptDetectTopic string `json:"chrome_intercept_detect_topic" yaml:"chrome_intercept_detect_topic"`
-	// ChromeInterceptResultTopic Chrome拦截探测结果topic
-	ChromeInterceptResultTopic string `json:"chrome_intercept_result_topic" yaml:"chrome_intercept_result_topic"`
 }
 
 // KafkaSaslConfig SASL认证配置

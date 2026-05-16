@@ -9,6 +9,7 @@ require (
 	github.com/google/wire v0.7.0
 	github.com/nacos-group/nacos-sdk-go v1.1.5
 	github.com/twmb/franz-go v1.20.7
+	gitlab.gainetics.io/backend-cdn/go-protos/probe-executor v1.5.3
 	gitlab.gainetics.io/shared/go-common/go-nacos-cli v0.0.7
 	gitlab.gainetics.io/shared/go-common/zap-kratos-log v0.0.7
 	gitlab.gainetics.io/shared/proto-hub/cloud-iam v0.4.2
