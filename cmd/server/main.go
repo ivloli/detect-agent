@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"detect-agent/internal/biz"
 	"detect-agent/internal/conf"
 	"detect-agent/internal/pkg/utils"
 	"detect-agent/internal/server"
@@ -74,6 +76,8 @@ func newApp(
 	hs *http.Server,
 	kafkaSrv *server.KafkaServer,
 	r registry.Registrar,
+	shepherd *biz.BrowserShepherd,
+	reporter *biz.NodeReporter,
 ) *kratos.App {
 	Name = conf.Data.Server.Name
 	app := kratos.New(
@@ -95,6 +99,14 @@ func newApp(
 		),
 		kratos.Registrar(r),
 	)
+	if shepherd != nil {
+		ctx := context.Background()
+		go shepherd.StartMonitor(ctx)
+	}
+	if reporter != nil {
+		ctx := context.Background()
+		go reporter.Start(ctx)
+	}
 
 	return app
 }
@@ -167,7 +179,7 @@ func main() {
 		bc.Nacos,
 		zaplog.LoggerWithWriterOptions(
 			conf.Data.Server.Env,
-			zaplog.WithFilename("batch.log"),
+			zaplog.WithFilename("detect-agent.log"),
 			zaplog.WithLogDir("./logs"),
 		),
 	)

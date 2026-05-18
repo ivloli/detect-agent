@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/go-kratos/kratos/v2/transport"
+	probecomm "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/common/v1"
 	"go.uber.org/zap"
 )
 
@@ -123,7 +124,7 @@ func (s *KafkaServer) initDNSBatchConsumer(kafkaConf *conf.KafkaConfig) error {
 	if err != nil {
 		return err
 	}
-	consumer.SetHandler(biz.NewChromeBatchHandler(s.batchInsertHandler))
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME, s.batchInsertHandler))
 	s.chromeBatchConsumer = consumer
 	return consumer.Start()
 }

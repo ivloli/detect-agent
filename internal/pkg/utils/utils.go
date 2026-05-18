@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -146,4 +148,40 @@ func ParseNacosServerAddr(addr string) ([]constant.ServerConfig, error) {
 	}
 
 	return sc, nil
+}
+
+// MakeResultID generates a deterministic 22-char base64url id from (taskID, taskSeqID, nodeID)
+// using SHA-256 -> truncate 128-bit -> base64url(no padding).
+//
+// Properties:
+// - Deterministic: same triple => same result_id
+// - Very low collision probability (128-bit output)
+// - URL-safe and short (22 chars)
+func MakeResultID(taskID, taskSeqID, nodeID string) string {
+	// Canonicalize to avoid "same meaning, different bytes" producing different IDs.
+	// Adjust rules based on your domain semantics (see notes below).
+	t := strings.ToLower(strings.TrimSpace(taskID))
+	s := strings.TrimSpace(taskSeqID)
+	n := strings.TrimSpace(nodeID)
+
+	// Use an unambiguous separator that is extremely unlikely to appear in IDs.
+	// Avoid just concatenation to prevent ambiguity: ("ab","c") vs ("a","bc").
+	const sep = '\x1f' // Unit Separator
+
+	// Build input bytes without extra allocations
+	// (small, but nice for high QPS).
+	totalLen := len(t) + 1 + len(s) + 1 + len(n)
+	buf := make([]byte, 0, totalLen)
+	buf = append(buf, t...)
+	buf = append(buf, sep)
+	buf = append(buf, s...)
+	buf = append(buf, sep)
+	buf = append(buf, n...)
+
+	sum := sha256.Sum256(buf)
+	// Truncate to 128-bit
+	idBytes := sum[:16]
+
+	// base64url without padding gives 22 chars for 16 bytes.
+	return base64.RawURLEncoding.EncodeToString(idBytes)
 }

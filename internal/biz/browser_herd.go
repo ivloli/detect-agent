@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"os/exec"
 	"sync"
 
@@ -16,16 +15,6 @@ import (
 const (
 	BrowserMaxDetectNum = 100000 // 单个浏览器最多在探测到这么多个url后强制重启
 )
-
-// Browser 浏览器
-type Browser struct {
-	AttachUrl       string      // chromedp attach的url
-	HealthCheckUrl  string      // 健康检查url
-	Process         *os.Process // 浏览器进程
-	Port            int         // debug端口
-	DetectingJobNum int         // 正在探测的任务数
-	DetectedJobNum  int         // 已经探测完成的任务数
-}
 
 type BrowserHerd struct {
 	logger            *log.Helper
@@ -50,7 +39,7 @@ func NewChromiumHerd(logger log.Logger, binaryPath string, minPort int, maxPort 
 	}
 	browsers := make([]*Browser, 0, conf.GetData().BrowserHerdSize+1)
 	for i := 0; i < conf.GetData().BrowserHerdSize+1; i++ {
-		b, err := herd.CreateChromiumInstance()
+		b, err := herd.CreateChromiumInstance(herd.logger)
 		if err != nil {
 			panic(err)
 		}
@@ -62,7 +51,7 @@ func NewChromiumHerd(logger log.Logger, binaryPath string, minPort int, maxPort 
 }
 
 // CreateChromiumInstance 创建chromium内核浏览器实例
-func (h *BrowserHerd) CreateChromiumInstance() (*Browser, error) {
+func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper) (*Browser, error) {
 	port := h.getAvailablePort()
 	if port == -1 {
 		return nil, fmt.Errorf("unable to find available port")
@@ -80,6 +69,7 @@ func (h *BrowserHerd) CreateChromiumInstance() (*Browser, error) {
 	}
 
 	b := &Browser{
+		logger:          logger,
 		AttachUrl:       "",
 		HealthCheckUrl:  fmt.Sprintf("http://127.0.0.1:%d/json/version", port),
 		Process:         cmd.Process,
@@ -138,49 +128,4 @@ func (h *BrowserHerd) BrowserHealthCheck(browser *Browser) (string, error) {
 		return "", err
 	}
 	return result.WebSocketDebuggerURL, nil
-}
-
-// HerdHealthCheck 对浏览器集群做健康检查
-func (h *BrowserHerd) HerdHealthCheck() error {
-	// 先确保冷备可用
-	_, err := h.BrowserHealthCheck(h.standBy)
-	if err != nil {
-		h.logger.Infof("standby browser unhealthy: %v, try to recover", err)
-		b, err := h.CreateChromiumInstance()
-		if err != nil {
-			panic(err)
-		}
-		old := h.standBy
-		h.mu.Lock()
-		h.standBy = b
-		h.mu.Unlock()
-		err = h.KillChromiumInstance(old)
-		if err != nil {
-			h.logger.Errorf("failed to kill browser instance: %v", err)
-		}
-	}
-	// 再逐个检查使用中的浏览器健康状况，不健康的浏览器用备用的替换掉，再新建备用，并kill旧的
-	for i := 0; i < len(h.availableBrowsers); i++ {
-		_, err := h.BrowserHealthCheck(h.availableBrowsers[i])
-		if err != nil {
-			h.logger.Infof("available browser unhealthy: %v, try to replace with standby", err)
-			old := h.availableBrowsers[i]
-			h.mu.Lock()
-			h.availableBrowsers[i] = h.standBy
-			h.standBy = nil
-			h.mu.Unlock()
-			b, err := h.CreateChromiumInstance()
-			if err != nil {
-				panic(err)
-			}
-			h.mu.Lock()
-			h.standBy = b
-			h.mu.Unlock()
-			err = h.KillChromiumInstance(old)
-			if err != nil {
-				h.logger.Errorf("failed to kill browser instance: %v", err)
-			}
-		}
-	}
-	return nil
 }

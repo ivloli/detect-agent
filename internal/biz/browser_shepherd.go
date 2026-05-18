@@ -64,7 +64,7 @@ func NewBrowserShepherd(logger log.Logger) *BrowserShepherd {
 	return bs
 }
 
-// StartMonitor
+// StartMonitor 定时检查所有浏览器健康状况，自动恢复不健康的实例
 func (s *BrowserShepherd) StartMonitor(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
@@ -73,12 +73,12 @@ func (s *BrowserShepherd) StartMonitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			go s.HerdChrome.HerdHealthCheck()
-			go s.HerdEdge.HerdHealthCheck()
-			go s.Herd360.HerdHealthCheck()
-			go s.HerdUC.HerdHealthCheck()
-			go s.HerdQuark.HerdHealthCheck()
-			go s.HerdSogou.HerdHealthCheck()
+			go s.HerdHealthCheck(s.HerdChrome)
+			go s.HerdHealthCheck(s.HerdEdge)
+			go s.HerdHealthCheck(s.Herd360)
+			go s.HerdHealthCheck(s.HerdUC)
+			go s.HerdHealthCheck(s.HerdQuark)
+			go s.HerdHealthCheck(s.HerdSogou)
 		}
 	}
 }
@@ -100,17 +100,19 @@ func (s *BrowserShepherd) GetAvailableBrowser(appType probecomm.InterceptAppType
 		randomInstance = herd.availableBrowsers[rand.IntN(len(herd.availableBrowsers))]
 	}
 	randomInstance.DetectingJobNum++
-	// 如果当前实例已经探测过80%最大次数，异步创建一个新的补充进来
+	// 如果当前实例已经探测过80%最大次数，启用冷备，异步创建一个新的冷备
 	if randomInstance.DetectedJobNum+randomInstance.DetectingJobNum >= BrowserMaxDetectNum*0.8 &&
-		len(herd.availableBrowsers) == conf.GetData().BrowserHerdSize {
+		len(herd.availableBrowsers) == conf.GetData().BrowserHerdSize && herd.standBy != nil {
+		herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
+		herd.standBy = nil
 		go func() {
-			newInstance, err := herd.CreateChromiumInstance()
+			newInstance, err := herd.CreateChromiumInstance(herd.logger)
 			if err != nil {
 				panic(err)
 			}
 			herd.mu.Lock()
 			defer herd.mu.Unlock()
-			herd.availableBrowsers = append(herd.availableBrowsers, newInstance)
+			herd.standBy = newInstance
 		}()
 	}
 	return randomInstance, nil
@@ -150,12 +152,12 @@ func (s *BrowserShepherd) ReleaseBrowser(appType probecomm.InterceptAppType, bro
 		// 如果已经提前把备用浏览器补充进来了，那么直接下掉就行了
 		if len(herd.availableBrowsers) > conf.GetData().BrowserHerdSize {
 			go herd.KillChromiumInstance(browser)
-		} else {
+		} else if herd.standBy != nil {
 			// 把备用补充进来，并创建新的备用
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 			herd.standBy = nil
 			go func() {
-				herd.standBy, err = herd.CreateChromiumInstance()
+				herd.standBy, err = herd.CreateChromiumInstance(herd.logger)
 				if err != nil {
 					panic(err)
 				}
@@ -195,4 +197,49 @@ func (s *BrowserShepherd) GetBrowserDetails() []*ctrlplanev1.InterceptNodeDetail
 		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_SOGOU, AppNum: uint32(len(s.HerdSogou.availableBrowsers))},
 	}
 	return res
+}
+
+// HerdHealthCheck 对浏览器集群做健康检查
+func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
+	// 先确保冷备可用
+	_, err := herd.BrowserHealthCheck(herd.standBy)
+	if err != nil {
+		s.logger.Infof("standby browser unhealthy: %v, try to recover", err)
+		b, err := herd.CreateChromiumInstance(herd.logger)
+		if err != nil {
+			panic(err)
+		}
+		old := herd.standBy
+		herd.mu.Lock()
+		herd.standBy = b
+		herd.mu.Unlock()
+		err = herd.KillChromiumInstance(old)
+		if err != nil {
+			s.logger.Errorf("failed to kill browser instance: %v", err)
+		}
+	}
+	// 再逐个检查使用中的浏览器健康状况，不健康的浏览器用备用的替换掉，再新建备用，并kill旧的
+	for i := 0; i < len(herd.availableBrowsers); i++ {
+		_, err := herd.BrowserHealthCheck(herd.availableBrowsers[i])
+		if err != nil {
+			s.logger.Infof("available browser unhealthy: %v, try to replace with standby", err)
+			old := herd.availableBrowsers[i]
+			herd.mu.Lock()
+			herd.availableBrowsers[i] = herd.standBy
+			herd.standBy = nil
+			herd.mu.Unlock()
+			b, err := herd.CreateChromiumInstance(herd.logger)
+			if err != nil {
+				panic(err)
+			}
+			herd.mu.Lock()
+			herd.standBy = b
+			herd.mu.Unlock()
+			err = herd.KillChromiumInstance(old)
+			if err != nil {
+				s.logger.Errorf("failed to kill browser instance: %v", err)
+			}
+		}
+	}
+	return nil
 }
