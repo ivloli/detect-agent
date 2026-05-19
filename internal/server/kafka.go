@@ -16,18 +16,23 @@ import (
 
 // KafkaServer Kafka服务器
 type KafkaServer struct {
-	chromeBatchConsumer *franzkafka.BatchDetectConsumer
-	batchInsertHandler  *biz.BatchDetectHandler // 批量探测处理器
+	batchConsumerChrome *franzkafka.BatchDetectConsumer
+	batchConsumerEdge   *franzkafka.BatchDetectConsumer
+	batchConsumer360    *franzkafka.BatchDetectConsumer
+	batchConsumerUC     *franzkafka.BatchDetectConsumer
+	batchConsumerQuark  *franzkafka.BatchDetectConsumer
+	batchConsumerSogou  *franzkafka.BatchDetectConsumer
+	batchDetectHandler  *biz.BatchDetectHandler // 批量探测处理器
 	logger              *log.Helper
 }
 
 // NewKafkaServer 创建Kafka服务器
 func NewKafkaServer(
-	batchInsertHandler *biz.BatchDetectHandler,
+	batchDetectHandler *biz.BatchDetectHandler,
 	logger log.Logger,
 ) *KafkaServer {
 	return &KafkaServer{
-		batchInsertHandler: batchInsertHandler,
+		batchDetectHandler: batchDetectHandler,
 		logger:             log.NewHelper(log.With(logger, "module", "server/kafka")),
 	}
 }
@@ -61,20 +66,19 @@ func (s *KafkaServer) Start(ctx context.Context) error {
 		return fmt.Errorf("kafka配置未加载，无法启动Kafka消费者")
 	}
 
-	// 启动批量写入消费者
-	if err := s.startBatchInsertConsumers(ctx, kafkaConf); err != nil {
-		s.logger.Errorf("启动批量写入消费者失败: %v", err)
-		// 批量写入消费者启动失败不影响主服务，继续运行
+	// 启动批量探测消费者
+	if err := s.startBatchDetectConsumers(ctx, kafkaConf); err != nil {
+		s.logger.Errorf("启动批量探测消费者失败: %v", err)
 	}
 
 	return nil
 }
 
-// startBatchInsertConsumers 启动批量写入消费者
-func (s *KafkaServer) startBatchInsertConsumers(ctx context.Context, kafkaConf *conf.KafkaConfig) error {
+// startBatchDetectConsumers 启动批量探测消费者
+func (s *KafkaServer) startBatchDetectConsumers(ctx context.Context, kafkaConf *conf.KafkaConfig) error {
 
-	if s.batchInsertHandler == nil {
-		s.logger.Warn("批量插入处理器未设置，跳过批量写入消费者启动")
+	if s.batchDetectHandler == nil {
+		s.logger.Warn("批量探测处理器未设置，跳过批量探测消费者启动")
 		return nil
 	}
 
@@ -86,9 +90,44 @@ func (s *KafkaServer) startBatchInsertConsumers(ctx context.Context, kafkaConf *
 	}{
 		{
 			name:  "Chrome",
-			topic: kafkaConf.ChromeInterceptDetectTopic,
+			topic: kafkaConf.InterceptDetectChromeTopic,
 			startFunc: func() error {
-				return s.initDNSBatchConsumer(kafkaConf)
+				return s.initChromeConsumer(kafkaConf)
+			},
+		},
+		{
+			name:  "Edge",
+			topic: kafkaConf.InterceptDetectEdgeTopic,
+			startFunc: func() error {
+				return s.initEdgeConsumer(kafkaConf)
+			},
+		},
+		{
+			name:  "360",
+			topic: kafkaConf.InterceptDetect360Topic,
+			startFunc: func() error {
+				return s.init360Consumer(kafkaConf)
+			},
+		},
+		{
+			name:  "UC",
+			topic: kafkaConf.InterceptDetectUCTopic,
+			startFunc: func() error {
+				return s.initUCConsumer(kafkaConf)
+			},
+		},
+		{
+			name:  "Quark",
+			topic: kafkaConf.InterceptDetectQuarkTopic,
+			startFunc: func() error {
+				return s.initQuarkConsumer(kafkaConf)
+			},
+		},
+		{
+			name:  "Sogou",
+			topic: kafkaConf.InterceptDetectSogouTopic,
+			startFunc: func() error {
+				return s.initSogouConsumer(kafkaConf)
 			},
 		},
 	}
@@ -96,11 +135,11 @@ func (s *KafkaServer) startBatchInsertConsumers(ctx context.Context, kafkaConf *
 	// 直接启动所有配置了 Topic 的消费者
 	for _, task := range tasks {
 		if task.topic == "" {
-			s.logger.Warnf("%s 批量写入Topic未配置，跳过", task.name)
+			s.logger.Warnf("%s 批量探测Topic未配置，跳过", task.name)
 			continue
 		}
 
-		s.logger.Infof("🚀 启动 %s 批量写入消费者 (Topic: %s)", task.name, task.topic)
+		s.logger.Infof("🚀 启动 %s 批量探测消费者 (Topic: %s)", task.name, task.topic)
 		if err := task.startFunc(); err != nil {
 			s.logger.Errorf("[%s] 启动失败: %v", task.name, err)
 		}
@@ -109,23 +148,123 @@ func (s *KafkaServer) startBatchInsertConsumers(ctx context.Context, kafkaConf *
 	return nil
 }
 
-func (s *KafkaServer) initDNSBatchConsumer(kafkaConf *conf.KafkaConfig) error {
+func (s *KafkaServer) initChromeConsumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.ChromeInterceptDetectTopic,
+		Topic:          kafkaConf.InterceptDetectChromeTopic,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
 	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
-	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "DNS")
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "Chrome")
 	if err != nil {
 		return err
 	}
-	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME, s.batchInsertHandler))
-	s.chromeBatchConsumer = consumer
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME, s.batchDetectHandler))
+	s.batchConsumerChrome = consumer
+	return consumer.Start()
+}
+
+func (s *KafkaServer) initEdgeConsumer(kafkaConf *conf.KafkaConfig) error {
+	config := &franzkafka.BatchDetectConsumerConfig{
+		Brokers:        kafkaConf.Brokers,
+		GroupID:        kafkaConf.Group,
+		Topic:          kafkaConf.InterceptDetectEdgeTopic,
+		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
+		BatchTimeoutMs: 1000,
+	}
+	s.applySaslConfig(config, kafkaConf)
+
+	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "Edge")
+	if err != nil {
+		return err
+	}
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_EDGE, s.batchDetectHandler))
+	s.batchConsumerEdge = consumer
+	return consumer.Start()
+}
+
+func (s *KafkaServer) init360Consumer(kafkaConf *conf.KafkaConfig) error {
+	config := &franzkafka.BatchDetectConsumerConfig{
+		Brokers:        kafkaConf.Brokers,
+		GroupID:        kafkaConf.Group,
+		Topic:          kafkaConf.InterceptDetect360Topic,
+		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
+		BatchTimeoutMs: 1000,
+	}
+	s.applySaslConfig(config, kafkaConf)
+
+	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "360")
+	if err != nil {
+		return err
+	}
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_360, s.batchDetectHandler))
+	s.batchConsumer360 = consumer
+	return consumer.Start()
+}
+
+func (s *KafkaServer) initUCConsumer(kafkaConf *conf.KafkaConfig) error {
+	config := &franzkafka.BatchDetectConsumerConfig{
+		Brokers:        kafkaConf.Brokers,
+		GroupID:        kafkaConf.Group,
+		Topic:          kafkaConf.InterceptDetectUCTopic,
+		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
+		BatchTimeoutMs: 1000,
+	}
+	s.applySaslConfig(config, kafkaConf)
+
+	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "UC")
+	if err != nil {
+		return err
+	}
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UC, s.batchDetectHandler))
+	s.batchConsumerUC = consumer
+	return consumer.Start()
+}
+
+func (s *KafkaServer) initQuarkConsumer(kafkaConf *conf.KafkaConfig) error {
+	config := &franzkafka.BatchDetectConsumerConfig{
+		Brokers:        kafkaConf.Brokers,
+		GroupID:        kafkaConf.Group,
+		Topic:          kafkaConf.InterceptDetectQuarkTopic,
+		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
+		BatchTimeoutMs: 1000,
+	}
+	s.applySaslConfig(config, kafkaConf)
+
+	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "Quark")
+	if err != nil {
+		return err
+	}
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK, s.batchDetectHandler))
+	s.batchConsumerQuark = consumer
+	return consumer.Start()
+}
+
+func (s *KafkaServer) initSogouConsumer(kafkaConf *conf.KafkaConfig) error {
+	config := &franzkafka.BatchDetectConsumerConfig{
+		Brokers:        kafkaConf.Brokers,
+		GroupID:        kafkaConf.Group,
+		Topic:          kafkaConf.InterceptDetectSogouTopic,
+		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
+		BatchTimeoutMs: 1000,
+	}
+	s.applySaslConfig(config, kafkaConf)
+
+	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "Sogou")
+	if err != nil {
+		return err
+	}
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_SOGOU, s.batchDetectHandler))
+	s.batchConsumerSogou = consumer
 	return consumer.Start()
 }
 
@@ -157,8 +296,38 @@ func (s *KafkaServer) Stop(ctx context.Context) error {
 	s.logger.Info("停止Kafka服务器")
 
 	var errs []error
-	if s.chromeBatchConsumer != nil {
-		err := s.chromeBatchConsumer.Stop()
+	if s.batchConsumerChrome != nil {
+		err := s.batchConsumerChrome.Stop()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.batchConsumerEdge != nil {
+		err := s.batchConsumerEdge.Stop()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.batchConsumer360 != nil {
+		err := s.batchConsumer360.Stop()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.batchConsumerUC != nil {
+		err := s.batchConsumerUC.Stop()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.batchConsumerQuark != nil {
+		err := s.batchConsumerQuark.Stop()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.batchConsumerSogou != nil {
+		err := s.batchConsumerSogou.Stop()
 		if err != nil {
 			errs = append(errs, err)
 		}

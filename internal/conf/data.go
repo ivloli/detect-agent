@@ -123,8 +123,18 @@ type KafkaConfig struct {
 	HeartbeatReportTopic string `json:"heartbeat_report_topic" yaml:"heartbeat_report_topic"`
 	// InterceptDetectResultTopic 拦截探测结果topic
 	InterceptDetectResultTopic string `json:"intercept_detect_result_topic" yaml:"intercept_detect_result_topic"`
-	// ChromeInterceptDetectTopic Chrome拦截探测topic
-	ChromeInterceptDetectTopic string `json:"chrome_intercept_detect_topic" yaml:"chrome_intercept_detect_topic"`
+	// InterceptDetectChromeTopic Chrome拦截探测topic
+	InterceptDetectChromeTopic string `json:"intercept_detect_chrome_topic" yaml:"intercept_detect_chrome_topic"`
+	// InterceptDetectEdgeTopic Edge拦截探测topic
+	InterceptDetectEdgeTopic string `json:"intercept_detect_edge_topic" yaml:"intercept_detect_edge_topic"`
+	// InterceptDetect360Topic 360拦截探测topic
+	InterceptDetect360Topic string `json:"intercept_detect_360_topic" yaml:"intercept_detect_360_topic"`
+	// InterceptDetectUCTopic UC拦截探测topic
+	InterceptDetectUCTopic string `json:"intercept_detect_uc_topic" yaml:"intercept_detect_uc_topic"`
+	// InterceptDetectQuarkTopic 夸克拦截探测topic
+	InterceptDetectQuarkTopic string `json:"intercept_detect_quark_topic" yaml:"intercept_detect_quark_topic"`
+	// InterceptDetectSogouTopic 搜狗拦截探测topic
+	InterceptDetectSogouTopic string `json:"intercept_detect_sogou_topic" yaml:"intercept_detect_sogou_topic"`
 }
 
 // KafkaSaslConfig SASL认证配置
