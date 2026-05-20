@@ -6,7 +6,6 @@ package main
 import (
 	"detect-agent/internal/biz"
 	"detect-agent/internal/conf"
-	"detect-agent/internal/grpc_client"
 	"detect-agent/internal/server"
 	"detect-agent/internal/service"
 
@@ -20,7 +19,6 @@ func wireApp(*conf.Nacos, log.Logger) (*kratos.App, func(), error) {
 		server.ProviderSet,
 		biz.ProviderSet,
 		service.ProviderSet,
-		grpc_client.NewClient,
 		server.NewKafkaServer,
 		newApp,
 	))

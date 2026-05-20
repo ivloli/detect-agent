@@ -201,7 +201,7 @@ func (s *BrowserShepherd) getBrowserHerd(appType probecomm.InterceptAppType) (*B
 		return s.HerdUC, nil
 	case probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK:
 		return s.HerdQuark, nil
-	case probecomm.InterceptAppType_INTERCEPT_APP_TYPE_SOGOU:
+	case probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ:
 		return s.HerdQQ, nil
 	default:
 		return nil, fmt.Errorf("unsupported appType: %v", appType)
@@ -216,7 +216,7 @@ func (s *BrowserShepherd) GetBrowserDetails() []*ctrlplanev1.InterceptNodeDetail
 		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_360, AppNum: uint32(len(s.Herd360.availableBrowsers))},
 		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UC, AppNum: uint32(len(s.HerdUC.availableBrowsers))},
 		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK, AppNum: uint32(len(s.HerdQuark.availableBrowsers))},
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_SOGOU, AppNum: uint32(len(s.HerdQQ.availableBrowsers))},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ, AppNum: uint32(len(s.HerdQQ.availableBrowsers))},
 	}
 	return res
 }

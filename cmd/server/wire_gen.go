@@ -9,7 +9,6 @@ package main
 import (
 	"detect-agent/internal/biz"
 	"detect-agent/internal/conf"
-	"detect-agent/internal/grpc_client"
 	"detect-agent/internal/pkg/franz-kafka"
 	"detect-agent/internal/server"
 	"detect-agent/internal/service"
@@ -26,16 +25,10 @@ import (
 func wireApp(nacos *conf.Nacos, logger log.Logger) (*kratos.App, func(), error) {
 	batchService := service.NewBatchService(logger)
 	grpcServer := server.NewGRPCServer(batchService, logger)
-	discovery := server.NewDiscoveryEngine(nacos, logger)
-	client, cleanup, err := grpc_client.NewClient(discovery, logger)
-	if err != nil {
-		return nil, nil, err
-	}
-	httpServer := server.NewHTTPServer(batchService, client, logger)
+	httpServer := server.NewHTTPServer(batchService, logger)
 	producerConfig := server.NewKafkaProducerConfig()
 	kafkaProducer, err := franz_kafka.NewKafkaProducer(producerConfig, logger)
 	if err != nil {
-		cleanup()
 		return nil, nil, err
 	}
 	browserShepherd := biz.NewBrowserShepherd(logger)
@@ -45,6 +38,5 @@ func wireApp(nacos *conf.Nacos, logger log.Logger) (*kratos.App, func(), error) 
 	nodeReporter := biz.NewNodeReporter(logger, kafkaProducer)
 	app := newApp(logger, grpcServer, httpServer, kafkaServer, registrar, browserShepherd, nodeReporter)
 	return app, func() {
-		cleanup()
 	}, nil
 }

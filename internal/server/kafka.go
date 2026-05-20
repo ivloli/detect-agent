@@ -124,10 +124,10 @@ func (s *KafkaServer) startBatchDetectConsumers(ctx context.Context, kafkaConf *
 			},
 		},
 		{
-			name:  "Sogou",
-			topic: kafkaConf.InterceptDetectSogouTopic,
+			name:  "QQ",
+			topic: kafkaConf.InterceptDetectQQTopic,
 			startFunc: func() error {
-				return s.initSogouConsumer(kafkaConf)
+				return s.initQQConsumer(kafkaConf)
 			},
 		},
 	}
@@ -150,12 +150,10 @@ func (s *KafkaServer) startBatchDetectConsumers(ctx context.Context, kafkaConf *
 
 func (s *KafkaServer) initChromeConsumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
-		Brokers:        kafkaConf.Brokers,
-		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.InterceptDetectChromeTopic,
-		Concurrency:    biz.TabPoolSize,
-		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
-		BatchTimeoutMs: 1000,
+		Brokers:     kafkaConf.Brokers,
+		GroupID:     kafkaConf.Group,
+		Topic:       kafkaConf.InterceptDetectChromeTopic,
+		Concurrency: biz.TabPoolSize,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
@@ -171,12 +169,10 @@ func (s *KafkaServer) initChromeConsumer(kafkaConf *conf.KafkaConfig) error {
 
 func (s *KafkaServer) initEdgeConsumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
-		Brokers:        kafkaConf.Brokers,
-		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.InterceptDetectEdgeTopic,
-		Concurrency:    biz.TabPoolSize,
-		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
-		BatchTimeoutMs: 1000,
+		Brokers:     kafkaConf.Brokers,
+		GroupID:     kafkaConf.Group,
+		Topic:       kafkaConf.InterceptDetectEdgeTopic,
+		Concurrency: biz.TabPoolSize,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
@@ -192,12 +188,10 @@ func (s *KafkaServer) initEdgeConsumer(kafkaConf *conf.KafkaConfig) error {
 
 func (s *KafkaServer) init360Consumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
-		Brokers:        kafkaConf.Brokers,
-		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.InterceptDetect360Topic,
-		Concurrency:    biz.TabPoolSize,
-		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
-		BatchTimeoutMs: 1000,
+		Brokers:     kafkaConf.Brokers,
+		GroupID:     kafkaConf.Group,
+		Topic:       kafkaConf.InterceptDetect360Topic,
+		Concurrency: biz.TabPoolSize,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
@@ -213,12 +207,10 @@ func (s *KafkaServer) init360Consumer(kafkaConf *conf.KafkaConfig) error {
 
 func (s *KafkaServer) initUCConsumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
-		Brokers:        kafkaConf.Brokers,
-		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.InterceptDetectUCTopic,
-		Concurrency:    biz.TabPoolSize,
-		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
-		BatchTimeoutMs: 1000,
+		Brokers:     kafkaConf.Brokers,
+		GroupID:     kafkaConf.Group,
+		Topic:       kafkaConf.InterceptDetectUCTopic,
+		Concurrency: biz.TabPoolSize,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
@@ -234,12 +226,10 @@ func (s *KafkaServer) initUCConsumer(kafkaConf *conf.KafkaConfig) error {
 
 func (s *KafkaServer) initQuarkConsumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
-		Brokers:        kafkaConf.Brokers,
-		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.InterceptDetectQuarkTopic,
-		Concurrency:    biz.TabPoolSize,
-		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
-		BatchTimeoutMs: 1000,
+		Brokers:     kafkaConf.Brokers,
+		GroupID:     kafkaConf.Group,
+		Topic:       kafkaConf.InterceptDetectQuarkTopic,
+		Concurrency: biz.TabPoolSize,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
@@ -253,23 +243,21 @@ func (s *KafkaServer) initQuarkConsumer(kafkaConf *conf.KafkaConfig) error {
 	return consumer.Start()
 }
 
-func (s *KafkaServer) initSogouConsumer(kafkaConf *conf.KafkaConfig) error {
+func (s *KafkaServer) initQQConsumer(kafkaConf *conf.KafkaConfig) error {
 	config := &franzkafka.BatchDetectConsumerConfig{
-		Brokers:        kafkaConf.Brokers,
-		GroupID:        kafkaConf.Group,
-		Topic:          kafkaConf.InterceptDetectSogouTopic,
-		Concurrency:    biz.TabPoolSize,
-		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
-		BatchTimeoutMs: 1000,
+		Brokers:     kafkaConf.Brokers,
+		GroupID:     kafkaConf.Group,
+		Topic:       kafkaConf.InterceptDetectQQTopic,
+		Concurrency: biz.TabPoolSize,
 	}
 	s.applySaslConfig(config, kafkaConf)
 
 	logger, _ := zap.NewProduction() // 生产环境建议通过依赖注入传入 logger
-	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "Sogou")
+	consumer, err := franzkafka.NewBatchDetectConsumer(config, logger, "QQ")
 	if err != nil {
 		return err
 	}
-	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_SOGOU, s.batchDetectHandler))
+	consumer.SetHandler(biz.NewChromiumBatchHandler(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ, s.batchDetectHandler))
 	s.batchConsumerSogou = consumer
 	return consumer.Start()
 }

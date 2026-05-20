@@ -80,16 +80,8 @@ func ConfigChangeCallback(namespace, group, dataId, data string, target interfac
 		log.Printf("   🌍 环境标识: %s (原值: %s)", configData.Server.Env, oldServerEnv)
 		log.Printf("   🌐 HTTP地址: %s (原值: %s)", configData.Server.HTTP.Addr, oldServerPort)
 
-		// 如果有gRPC客户端配置，也打印出来
-		if configData.GrpcClients != nil {
-			if configData.GrpcClients.IamService != nil {
-				log.Printf("   🔐 IAM服务gRPC: %s (超时: %s)",
-					configData.GrpcClients.IamService.Endpoint,
-					configData.GrpcClients.IamService.Timeout)
-			}
-		}
-
 		log.Printf("🎉 [配置更新完成] Nacos配置监听和绑定成功!")
+		// todo: 后续在此处监听版本变化后更新版本
 	}
 	return nil
 }
@@ -97,9 +89,6 @@ func ConfigChangeCallback(namespace, group, dataId, data string, target interfac
 // ConfigData nacos 上对应配置结构体
 type ConfigData struct {
 	Server Server `json:"server"`
-
-	// GrpcClients 各种gRPC客户端配置
-	GrpcClients *GrpcClients `yaml:"grpc_clients" json:"grpc_clients"`
 
 	// Kafka 配置
 	Kafka *KafkaConfig `json:"kafka" yaml:"kafka"`
@@ -114,8 +103,7 @@ type KafkaConfig struct {
 	// SASL认证配置
 	Sasl *KafkaSaslConfig `json:"sasl" yaml:"sasl"`
 	// TLS配置
-	Tls       *KafkaTlsConfig `json:"tls" yaml:"tls"`
-	BatchSize int             `json:"batch_size" yaml:"batch_size"`
+	Tls *KafkaTlsConfig `json:"tls" yaml:"tls"`
 	// HeartbeatReportTopic 心跳上报topic
 	HeartbeatReportTopic string `json:"heartbeat_report_topic" yaml:"heartbeat_report_topic"`
 	// InterceptDetectResultTopic 拦截探测结果topic
@@ -130,8 +118,8 @@ type KafkaConfig struct {
 	InterceptDetectUCTopic string `json:"intercept_detect_uc_topic" yaml:"intercept_detect_uc_topic"`
 	// InterceptDetectQuarkTopic 夸克拦截探测topic
 	InterceptDetectQuarkTopic string `json:"intercept_detect_quark_topic" yaml:"intercept_detect_quark_topic"`
-	// InterceptDetectSogouTopic 搜狗拦截探测topic
-	InterceptDetectSogouTopic string `json:"intercept_detect_sogou_topic" yaml:"intercept_detect_sogou_topic"`
+	// InterceptDetectQQTopic QQ浏览器拦截探测topic
+	InterceptDetectQQTopic string `json:"intercept_detect_qq_topic" yaml:"intercept_detect_qq_topic"`
 }
 
 // KafkaSaslConfig SASL认证配置
@@ -165,18 +153,4 @@ type Server struct {
 		Timeout int64  `json:"timeout" yaml:"timeout"`
 		Network string `json:"network" yaml:"network"`
 	} `json:"grpc" yaml:"grpc"`
-}
-
-// GrpcClients 定义所有gRPC客户端配置
-type GrpcClients struct {
-	// IamService IAM服务客户端配置
-	IamService *GrpcClientConfig `yaml:"iam_service" json:"iam_service"`
-}
-
-// GrpcClientConfig 定义单个gRPC客户端配置
-type GrpcClientConfig struct {
-	// Endpoint 服务发现地址，例如：discovery:///observable.user.service
-	Endpoint string `yaml:"endpoint" json:"endpoint"`
-	// Timeout 请求超时时间，格式：10s, 1m 等
-	Timeout string `yaml:"timeout" json:"timeout"`
 }

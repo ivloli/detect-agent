@@ -11,13 +11,11 @@ import (
 
 // BatchDetectConsumerConfig 批量探测消费者配置
 type BatchDetectConsumerConfig struct {
-	Brokers        []string    // Kafka brokers地址
-	GroupID        string      // 消费者组ID
-	Topic          string      // 消费的主题
-	Concurrency    int         // 并发处理协程数，对应 TabPoolSize
-	MaxBatchSize   int         // 保留字段，不使用
-	BatchTimeoutMs int         // 保留字段，不使用
-	Sasl           *SaslConfig // SASL认证配置
+	Brokers     []string    // Kafka brokers地址
+	GroupID     string      // 消费者组ID
+	Topic       string      // 消费的主题
+	Concurrency int         // 并发处理协程数，对应 TabPoolSize
+	Sasl        *SaslConfig // SASL认证配置
 }
 
 // MessageHandler 消息处理器接口

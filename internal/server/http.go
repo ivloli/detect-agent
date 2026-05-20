@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"detect-agent/internal/conf"
-	"detect-agent/internal/grpc_client"
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/go-kratos/kratos/v2/middleware/logging"
@@ -56,7 +55,6 @@ func requestDecoder() func(r *http.Request, v interface{}) error {
 // NewHTTPServer new an HTTP server.
 func NewHTTPServer(
 	batchSrv *service.BatchService,
-	iamClient grpc_client.Client,
 	logger log.Logger,
 ) *kratoshttp.Server {
 
