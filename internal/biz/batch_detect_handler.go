@@ -6,8 +6,6 @@ import (
 	"detect-agent/internal/pkg/franz-kafka"
 	"encoding/json"
 	"fmt"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -60,75 +58,64 @@ func NewChromiumBatchHandler(appType probecomm.InterceptAppType, handler *BatchD
 	}
 }
 
-// HandleBatch 批量处理Chromium消息，并发在chromium浏览器上进行探测
-func (h *ChromiumBatchHandler) HandleBatch(ctx context.Context, keys [][]byte, values [][]byte) (int, error) {
-	if len(values) == 0 {
-		return 0, nil
+// Handle 处理单条Chromium消息，在chromium浏览器上进行探测
+func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []byte) error {
+	if len(value) == 0 {
+		return nil
 	}
 	resTopic := conf.GetData().Kafka.InterceptDetectResultTopic
 	if len(resTopic) == 0 {
 		h.handler.logger.Error("InterceptDetectResult topic is empty")
-		return 0, nil
+		return nil
 	}
-	var successCnt atomic.Int32
-	var wg sync.WaitGroup
-	// 反序列化所有消息
-	for i := range values {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			var msg *ctrlplanev1.TaskCreateRequest
-			if err := json.Unmarshal(values[idx], &msg); err != nil {
-				h.handler.logger.Errorf("HandleBatch unmarshal chromium kafka msg to TaskCreateRequest failed: %v", err)
-				return
-			}
-			output := &localapiv1.InterceptDetectResult{
-				App:       h.appType,
-				Error:     "",
-				RawResult: "",
-			}
-			var param *localapiv1.InterceptDetectParam
-			if err := json.Unmarshal([]byte(msg.GetPayloadJson()), &param); err != nil {
-				h.handler.logger.Errorf("HandleBatch unmarshal chromium payload json to InterceptDetectParam failed: %v", err)
-				output.Error = err.Error()
-				output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-				h.sendResult(ctx, msg, output, CodeError, "unmarshal failed", err.Error(), resTopic)
-				return
-			}
-			newCtx, cancel := context.WithTimeout(ctx, time.Duration(msg.GetTimeoutSec())*time.Second)
-			defer cancel()
 
-			browser, tab, err := h.handler.browserShepherd.GetAvailableBrowserTab(h.appType)
-			if err != nil {
-				h.handler.logger.Errorf("HandleBatch get available browser failed: %v", err)
-				output.Error = err.Error()
-				output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-				h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic)
-				return
-			}
-			defer h.handler.browserShepherd.ReleaseBrowserTab(h.appType, browser, tab)
-
-			blocked, detail, err := browser.ChromiumDetect(newCtx, tab, param.Url)
-			output.RawResult = detail
-			if err != nil {
-				h.handler.logger.Errorf("HandleBatch detect browser failed: %v", err)
-				output.Error = err.Error()
-				output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-				h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic)
-				return
-			}
-			if blocked {
-				output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_BLOCKED
-			} else {
-				output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL
-			}
-			successCnt.Add(1)
-			h.sendResult(ctx, msg, output, CodeSuccess, "", "", resTopic)
-		}(i)
+	var msg *ctrlplanev1.TaskCreateRequest
+	if err := json.Unmarshal(value, &msg); err != nil {
+		h.handler.logger.Errorf("Handle unmarshal chromium kafka msg to TaskCreateRequest failed: %v", err)
+		return err
 	}
-	wg.Wait()
+	output := &localapiv1.InterceptDetectResult{
+		App:       h.appType,
+		Error:     "",
+		RawResult: "",
+	}
+	var param *localapiv1.InterceptDetectParam
+	if err := json.Unmarshal([]byte(msg.GetPayloadJson()), &param); err != nil {
+		h.handler.logger.Errorf("Handle unmarshal chromium payload json to InterceptDetectParam failed: %v", err)
+		output.Error = err.Error()
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+		h.sendResult(ctx, msg, output, CodeError, "unmarshal failed", err.Error(), resTopic)
+		return nil
+	}
+	newCtx, cancel := context.WithTimeout(ctx, time.Duration(msg.GetTimeoutSec())*time.Second)
+	defer cancel()
 
-	return int(successCnt.Load()), nil
+	browser, tab, err := h.handler.browserShepherd.GetAvailableBrowserTab(h.appType)
+	if err != nil {
+		h.handler.logger.Errorf("Handle get available browser failed: %v", err)
+		output.Error = err.Error()
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+		h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic)
+		return nil
+	}
+	defer h.handler.browserShepherd.ReleaseBrowserTab(h.appType, browser, tab)
+
+	blocked, detail, err := browser.ChromiumDetect(newCtx, tab, param.Url)
+	output.RawResult = detail
+	if err != nil {
+		h.handler.logger.Errorf("Handle detect browser failed: %v", err)
+		output.Error = err.Error()
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+		h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic)
+		return nil
+	}
+	if blocked {
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_BLOCKED
+	} else {
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL
+	}
+	h.sendResult(ctx, msg, output, CodeSuccess, "", "", resTopic)
+	return nil
 }
 
 func (h *ChromiumBatchHandler) sendResult(ctx context.Context, in *ctrlplanev1.TaskCreateRequest,

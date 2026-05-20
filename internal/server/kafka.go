@@ -153,6 +153,7 @@ func (s *KafkaServer) initChromeConsumer(kafkaConf *conf.KafkaConfig) error {
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
 		Topic:          kafkaConf.InterceptDetectChromeTopic,
+		Concurrency:    biz.TabPoolSize,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}
@@ -173,6 +174,7 @@ func (s *KafkaServer) initEdgeConsumer(kafkaConf *conf.KafkaConfig) error {
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
 		Topic:          kafkaConf.InterceptDetectEdgeTopic,
+		Concurrency:    biz.TabPoolSize,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}
@@ -193,6 +195,7 @@ func (s *KafkaServer) init360Consumer(kafkaConf *conf.KafkaConfig) error {
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
 		Topic:          kafkaConf.InterceptDetect360Topic,
+		Concurrency:    biz.TabPoolSize,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}
@@ -213,6 +216,7 @@ func (s *KafkaServer) initUCConsumer(kafkaConf *conf.KafkaConfig) error {
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
 		Topic:          kafkaConf.InterceptDetectUCTopic,
+		Concurrency:    biz.TabPoolSize,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}
@@ -233,6 +237,7 @@ func (s *KafkaServer) initQuarkConsumer(kafkaConf *conf.KafkaConfig) error {
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
 		Topic:          kafkaConf.InterceptDetectQuarkTopic,
+		Concurrency:    biz.TabPoolSize,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}
@@ -253,6 +258,7 @@ func (s *KafkaServer) initSogouConsumer(kafkaConf *conf.KafkaConfig) error {
 		Brokers:        kafkaConf.Brokers,
 		GroupID:        kafkaConf.Group,
 		Topic:          kafkaConf.InterceptDetectSogouTopic,
+		Concurrency:    biz.TabPoolSize,
 		MaxBatchSize:   conf.GetData().Kafka.BatchSize,
 		BatchTimeoutMs: 1000,
 	}

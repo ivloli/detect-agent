@@ -14,39 +14,38 @@ type BatchDetectConsumerConfig struct {
 	Brokers        []string    // Kafka brokers地址
 	GroupID        string      // 消费者组ID
 	Topic          string      // 消费的主题
-	MaxBatchSize   int         // 批量处理最大消息数量，默认100
-	BatchTimeoutMs int         // 批量处理超时时间（毫秒），默认1000
+	Concurrency    int         // 并发处理协程数，对应 TabPoolSize
+	MaxBatchSize   int         // 保留字段，不使用
+	BatchTimeoutMs int         // 保留字段，不使用
 	Sasl           *SaslConfig // SASL认证配置
 }
 
-// BatchMessageHandler 批量消息处理器接口
-type BatchMessageHandler interface {
-	// HandleBatch 批量处理消息
-	// keys: 消息键列表（字节数组列表）
-	// values: 消息值列表（字节数组列表）
-	// 返回成功处理的消息数量和错误
-	HandleBatch(ctx context.Context, keys [][]byte, values [][]byte) (int, error)
+// MessageHandler 消息处理器接口
+type MessageHandler interface {
+	// Handle 处理单条消息
+	// key: 消息键
+	// value: 消息值
+	// 返回错误
+	Handle(ctx context.Context, key []byte, value []byte) error
 }
 
-// BatchDetectConsumer 批量探测消费者
+// BatchDetectConsumer 探测消费者
 type BatchDetectConsumer struct {
 	client       *kgo.Client
 	config       *BatchDetectConsumerConfig
 	logger       *zap.Logger
-	handler      BatchMessageHandler
+	handler      MessageHandler
 	ctx          context.Context
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	consumerName string
+	msgChan      chan *kgo.Record
 }
 
-// NewBatchDetectConsumer 创建批量探测消费者
+// NewBatchDetectConsumer 创建探测消费者
 func NewBatchDetectConsumer(config *BatchDetectConsumerConfig, logger *zap.Logger, consumerName string) (*BatchDetectConsumer, error) {
-	if config.MaxBatchSize <= 0 {
-		config.MaxBatchSize = 100
-	}
-	if config.BatchTimeoutMs <= 0 {
-		config.BatchTimeoutMs = 1000
+	if config.Concurrency <= 0 {
+		config.Concurrency = 50
 	}
 
 	// 构建客户端选项
@@ -55,8 +54,6 @@ func NewBatchDetectConsumer(config *BatchDetectConsumerConfig, logger *zap.Logge
 		kgo.ConsumerGroup(config.GroupID),
 		kgo.ConsumeTopics(config.Topic),
 		kgo.FetchMaxBytes(50 * 1024 * 1024), // 50MB
-		// 设置 FetchMaxWait 稍微小于 BatchTimeoutMs，让 Poll 能够更及时返回
-		kgo.FetchMaxWait(time.Duration(config.BatchTimeoutMs/2) * time.Millisecond),
 		kgo.FetchMinBytes(1),
 		kgo.DisableAutoCommit(), // 手动提交偏移量
 
@@ -65,6 +62,11 @@ func NewBatchDetectConsumer(config *BatchDetectConsumerConfig, logger *zap.Logge
 		kgo.HeartbeatInterval(3 * time.Second),
 		kgo.RebalanceTimeout(60 * time.Second),
 		kgo.RequireStableFetchOffsets(),
+	}
+
+	// 如果有 SASL 配置，添加选项
+	if config.Sasl != nil && config.Sasl.Enable {
+		// 暂无具体实现
 	}
 
 	// 创建Kafka客户端
@@ -85,20 +87,27 @@ func NewBatchDetectConsumer(config *BatchDetectConsumerConfig, logger *zap.Logge
 	}, nil
 }
 
-// SetHandler 设置批量消息处理器
-func (c *BatchDetectConsumer) SetHandler(handler BatchMessageHandler) {
+// SetHandler 设置单条消息处理器
+func (c *BatchDetectConsumer) SetHandler(handler MessageHandler) {
 	c.handler = handler
 }
 
 // Start 启动消费者
 func (c *BatchDetectConsumer) Start() error {
-	c.logger.Info("启动批量探测消费者",
+	c.logger.Info("启动探测消费者",
 		zap.String("consumer", c.consumerName),
 		zap.Strings("brokers", c.config.Brokers),
 		zap.String("groupId", c.config.GroupID),
 		zap.String("topic", c.config.Topic),
-		zap.Int("maxBatchSize", c.config.MaxBatchSize),
-		zap.Int("batchTimeoutMs", c.config.BatchTimeoutMs))
+		zap.Int("concurrency", c.config.Concurrency))
+
+	c.msgChan = make(chan *kgo.Record, c.config.Concurrency)
+
+	// 启动 workers
+	for i := 0; i < c.config.Concurrency; i++ {
+		c.wg.Add(1)
+		go c.workerLoop(i)
+	}
 
 	c.wg.Add(1)
 	go c.consumeLoop()
@@ -108,161 +117,91 @@ func (c *BatchDetectConsumer) Start() error {
 
 // Stop 停止消费者
 func (c *BatchDetectConsumer) Stop() error {
-	c.logger.Info("停止批量探测消费者", zap.String("consumer", c.consumerName))
+	c.logger.Info("停止探测消费者", zap.String("consumer", c.consumerName))
 	c.cancel()
 	c.wg.Wait()
 	c.client.Close()
-	c.logger.Info("批量探测消费者已停止", zap.String("consumer", c.consumerName))
+	c.logger.Info("探测消费者已停止", zap.String("consumer", c.consumerName))
 	return nil
 }
 
-// consumeLoop 主消费循环 - 优化后的攒批逻辑
+// consumeLoop 主消费循环，从Kafka拉取消息发送到 channel
 func (c *BatchDetectConsumer) consumeLoop() {
 	defer c.wg.Done()
+	defer close(c.msgChan)
 
-	c.logger.Info("开始批量消费循环", zap.String("consumer", c.consumerName))
-
-	var (
-		recordsBatch []*kgo.Record
-		valuesBatch  [][]byte
-		timeout      = time.Duration(c.config.BatchTimeoutMs) * time.Millisecond
-		timer        = time.NewTimer(timeout)
-	)
-
-	// 初始停止定时器
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-
-	activeTimer := false
+	c.logger.Info("开始消费循环", zap.String("consumer", c.consumerName))
 
 	for {
-		// 每次进入 Poll 前检查 context
 		if c.ctx.Err() != nil {
-			if len(valuesBatch) > 0 {
-				c.processBatch(recordsBatch, valuesBatch)
-			}
 			return
 		}
 
-		// 使用 Poll 实现阻塞式拉取，并设置一个小的内部超时以便触发定时检查
-		pollCtx, cancel := context.WithTimeout(c.ctx, 100*time.Millisecond)
-		fetches := c.client.PollFetches(pollCtx)
-		cancel()
-
+		// 使用 Poll 实现阻塞式拉取
+		fetches := c.client.PollFetches(c.ctx)
 		if fetches.IsClientClosed() {
 			return
 		}
 
-		// 处理拉取到的消息
-		iter := fetches.RecordIter()
-		hasNewMessages := !iter.Done()
+		if errs := fetches.Errors(); len(errs) > 0 {
+			c.logger.Error("拉取消息时发生错误", zap.String("consumer", c.consumerName), zap.Any("errors", errs))
+		}
 
+		iter := fetches.RecordIter()
 		for !iter.Done() {
 			record := iter.Next()
-			recordsBatch = append(recordsBatch, record)
-			valuesBatch = append(valuesBatch, record.Value)
-
-			// 检查是否达到批次上限
-			if len(valuesBatch) >= c.config.MaxBatchSize {
-				c.logger.Debug("达到批处理上限触发探测",
-					zap.String("consumer", c.consumerName),
-					zap.Int("count", len(valuesBatch)))
-
-				c.processBatch(recordsBatch, valuesBatch)
-
-				// 清理状态
-				recordsBatch = nil
-				valuesBatch = nil
-				if activeTimer {
-					if !timer.Stop() {
-						select {
-						case <-timer.C:
-						default:
-						}
-					}
-					activeTimer = false
-				}
-			}
-		}
-
-		// 处理批次逻辑：
-		// 1. 如果缓冲区为空且有新消息加入，启动定时器
-		// 2. 如果定时器已启动，检查是否超时（通过 select 非阻塞检查）
-
-		if len(valuesBatch) > 0 && !activeTimer {
-			// 新批次开始，启动定时器
-			timer.Reset(timeout)
-			activeTimer = true
-		}
-
-		// 检查定时器状态
-		if activeTimer {
 			select {
-			case <-timer.C:
-				// 超时触发探测
-				c.logger.Debug("批处理超时触发探测",
-					zap.String("consumer", c.consumerName),
-					zap.Int("count", len(valuesBatch)))
-
-				c.processBatch(recordsBatch, valuesBatch)
-
-				// 重置状态
-				recordsBatch = nil
-				valuesBatch = nil
-				activeTimer = false
-			default:
-				// 未超时，继续下一轮 Poll
+			case <-c.ctx.Done():
+				return
+			case c.msgChan <- record:
 			}
-		}
-
-		// 如果没有新消息且没有活跃的定时器（缓冲区已清空），或者还在等待更多消息，继续循环
-		if !hasNewMessages && !activeTimer && len(valuesBatch) == 0 {
-			// 休眠一小会儿避免 CPU 占用过高，或者直接进入下一轮阻塞 Poll
 		}
 	}
 }
 
-// processBatch 批量处理消息
-func (c *BatchDetectConsumer) processBatch(records []*kgo.Record, values [][]byte) {
-	if len(values) == 0 {
-		return
+// workerLoop 并发处理协程
+func (c *BatchDetectConsumer) workerLoop(workerID int) {
+	defer c.wg.Done()
+	c.logger.Info("Worker started", zap.Int("worker_id", workerID), zap.String("consumer", c.consumerName))
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case record, ok := <-c.msgChan:
+			if !ok {
+				return
+			}
+			c.processRecord(record)
+		}
 	}
+}
 
+// processRecord 处理单条消息并提交偏移量
+func (c *BatchDetectConsumer) processRecord(record *kgo.Record) {
 	if c.handler == nil {
-		c.logger.Error("批量消息处理器未设置", zap.String("consumer", c.consumerName))
+		c.logger.Error("消息处理器未设置", zap.String("consumer", c.consumerName))
 		return
-	}
-
-	// 提取 keys
-	keys := make([][]byte, len(records))
-	for i, record := range records {
-		keys[i] = record.Key
 	}
 
 	startTime := time.Now()
-	count := len(values)
-
-	// 调用批量处理器（传入 keys 和 values）
-	successCount, err := c.handler.HandleBatch(c.ctx, keys, values)
+	// 调用单条处理器
+	err := c.handler.Handle(c.ctx, record.Key, record.Value)
 	if err != nil {
-		c.logger.Error("批量处理消息失败",
+		c.logger.Error("处理消息失败",
 			zap.String("consumer", c.consumerName),
-			zap.Int("totalCount", count),
-			zap.Int("successCount", successCount),
+			zap.Int("partition", int(record.Partition)),
+			zap.Int64("offset", record.Offset),
 			zap.Error(err))
 	} else {
-		c.logger.Info("批量处理消息成功",
+		c.logger.Info("处理消息成功",
 			zap.String("consumer", c.consumerName),
-			zap.Int("count", count),
+			zap.Int("partition", int(record.Partition)),
+			zap.Int64("offset", record.Offset),
 			zap.Duration("duration", time.Since(startTime)))
 	}
 
 	// 提交偏移量
-	if err := c.client.CommitRecords(c.ctx, records...); err != nil {
+	if err := c.client.CommitRecords(c.ctx, record); err != nil {
 		c.logger.Error("提交偏移量失败",
 			zap.String("consumer", c.consumerName),
 			zap.Error(err))
