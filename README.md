@@ -2,7 +2,7 @@
 
 ## 📋 项目概述
 
-Detect Agent 是一个基于真实浏览器集群的**网络拦截探测代理服务**。它管理多个 Chromium 内核的浏览器实例（如 Chrome、Edge、360 浏览器等），通过 Chrome DevTools Protocol (CDP) 自动操控真实浏览器访问目标 URL，检测浏览器是否对请求进行了**安全拦截**（如 Safe Browsing 拦截、证书错误拦截等），并将探测结果上报到消息队列。
+Detect Agent 是一个基于真实浏览器集群的**网络拦截探测代理服务**。它管理多个 Chromium 内核的浏览器实例（如 Chrome、Edge、360 浏览器、UC、Quark、QQ 浏览器等），通过 Chrome DevTools Protocol (CDP) 自动操控真实浏览器访问目标 URL，检测浏览器是否对请求进行了**安全拦截**（如 Safe Browsing 拦截、证书错误拦截等），并将探测结果上报到消息队列。
 
 该项目主要用于大规模 URL 安全监测场景，模拟真实用户浏览行为来验证特定 URL 在各个浏览器下的可访问性。
 
@@ -37,13 +37,14 @@ Detect Agent 是一个基于真实浏览器集群的**网络拦截探测代理�
 │  │  ┌──────────────┐     ┌──────────────────┐              │ │
 │  │  │ Browser      │     │ BrowserHerd      │              │ │
 │  │  │ (单个浏览器)  │◄────│ (浏览器集群)     │              │ │
-│  │  └──────────────┘     └────────┬─────────┘              │ │
-│  │                                │                        │ │
+│  │  │  + TabPool   │     └────────┬─────────┘              │ │
+│  │  │  (50个Tab)   │              │                        │ │
+│  │  └──────────────┘              │                        │ │
 │  │                    ┌───────────▼───────────┐            │ │
 │  │                    │ BrowserShepherd       │            │ │
 │  │                    │ (浏览器群管理者)       │            │ │
 │  │                    │ - Chrome/Edge/360/UC  │            │ │
-│  │                    │   Quark/Sogou 共6种   │            │ │
+│  │                    │   Quark/QQ 共6种      │            │ │
 │  │                    └───────────┬───────────┘            │ │
 │  │                                │                        │ │
 │  │  ┌─────────────────────────────┼─────────────────────┐  │ │
@@ -63,32 +64,41 @@ Detect Agent 是一个基于真实浏览器集群的**网络拦截探测代理�
 ## 🚀 核心功能
 
 ### 1. 浏览器农场管理
-- 管理 **6 种** Chromium 内核浏览器的实例集群：Chrome、Edge、360、UC、Quark、搜狗
-- 每个浏览器类型维护一个 **浏览器实例池**（大小可配置）
+- 管理 **6 种** Chromium 内核浏览器的实例集群：Chrome、Edge、360、UC、Quark、**QQ** 浏览器
+- 每个浏览器类型维护一个 **浏览器实例池**（大小可配置，默认 1 个活跃 + 1 个冷备）
+- 每个浏览器实例预创建 **50 个可复用 Tab**，避免重复新建/销毁 Tab 的开销
 - 采用 **冷备策略（Standby）**：池中始终维护一个备用实例，当活跃实例达到探测次数上限时无缝替换
 - 每 **2 分钟** 自动进行 **全量健康检查**，自动替换不健康的实例
 
-### 2. URL 拦截探测
+### 2. Tab 池 (Tab Pool)
+- 每个浏览器实例启动时预创建 `TabPoolSize=50` 个 Tab
+- Tab 通过 `chromedp.NewContext` 创建并复用，减少 CDP 连接开销
+- 每个 Tab 内置 `TabDetector`：独立监听网络事件（Request/Response/LoadingFailed）
+- 支持高并发探测：同一浏览器的 50 个 Tab 可同时执行不同 URL 的探测任务
+
+### 3. URL 拦截探测
 - 使用 `chromedp` 库通过 CDP 协议操控真实浏览器访问目标 URL
-- **400ms 短超时** 探测：利用浏览器安全拦截（如 ERR_BLOCKED）响应极快的特性，不等页面完全加载
+- **400ms 短超时** 探测：利用浏览器安全拦截（如 `ERR_BLOCKED`）响应极快的特性，不等页面完全加载
 - 监听网络事件（Request/Response/LoadingFailed），精准识别拦截行为
 - 支持文档、XHR、Fetch 等资源类型的拦截检测
+- 探测结果包含详细的网络事件日志，可追踪完整的请求链路
 
-### 3. Kafka 消息驱动
+### 4. Kafka 消息驱动
 - 从 Kafka 消费 `TaskCreateRequest` 消息进行批量探测
 - 探测结果序列化后发送到 `InterceptDetectResult` Topic
 - 支持高并发：每个探测任务独立 goroutine 执行，并发处理
+- 消费者采用 **轮询（Polling）模式**，支持批量拉取和优雅关闭
 
-### 4. 节点注册与心跳
+### 5. 节点注册与心跳
 - 启动时向 Probe Center 上报节点**注册**信息
 - 每 **30 秒** 上报一次**心跳**，包含各浏览器集群的实例数量详情
 
-### 5. 动态配置
+### 6. 动态配置
 - 基于 **Nacos** 的配置中心
 - 支持运行时动态更新 Kafka 配置、浏览器集群大小等
 - 配置变更自动回调，无需重启服务
 
-### 6. 可观测性
+### 7. 可观测性
 - **OpenTelemetry** 链路追踪
 - 支持 **Jaeger** 采集上报
 - **zap** 结构化日志，支持日志分级和文件输出
@@ -109,9 +119,11 @@ detect-agent/
 ├── internal/
 │   ├── biz/                  # 业务逻辑层
 │   │   ├── biz.go            # Wire ProviderSet 定义
-│   │   ├── browser.go        # 浏览器实例模型 & Chromium 探测逻辑
+│   │   ├── biz_test.go       # 业务逻辑单元测试
+│   │   ├── browser.go        # 浏览器实例模型 & Chromium 探测逻辑 + Tab池管理
 │   │   ├── browser_herd.go   # 浏览器集群管理（创建、销毁、健康检查）
 │   │   ├── browser_shepherd.go # 浏览器群管理者（6种浏览器集群）
+│   │   ├── browser_tab.go    # Tab探测器（TabDetector & NetworkEvent 网络事件模型）
 │   │   ├── batch_detect_handler.go # Kafka 批量探测处理器
 │   │   └── node_reporter.go  # 节点注册 & 心跳上报
 │   ├── conf/                 # 配置层
@@ -121,18 +133,18 @@ detect-agent/
 │   │   └── provider.go       # 配置 Provider
 │   ├── errors/               # 错误码 & 错误处理
 │   │   ├── error.go
-│   │   └── errorCode.go
-│   ├── grpc_client/          # gRPC 客户端
-│   │   └── iam_client.go     # IAM 认证客户端
+│   │   ├── errorCode.go
+│   │   └── errors_test.go    # 错误处理单元测试
 │   ├── pkg/
 │   │   ├── franz-kafka/      # Kafka 封装
 │   │   │   ├── kafka.go      # Kafka 客户端
 │   │   │   ├── producer.go   # 消息生产者
-│   │   │   └── batch_detect_consumer.go # 批量探测消费者
+│   │   │   └── batch_detect_consumer.go # 批量探测消费者（轮询模式）
 │   │   └── utils/            # 工具函数
-│   │       ├── cmd_util.go   # 命令执行工具
+│   │       ├── cmd_util.go   # 命令执行工具（端口检测等）
 │   │       ├── time.go       # 时间工具
-│   │       └── utils.go      # 通用工具（端口检测等）
+│   │       ├── utils.go      # 通用工具
+│   │       └── utils_test.go # 工具函数单元测试
 │   ├── server/               # 服务层
 │   │   ├── server.go         # Wire ProviderSet 定义
 │   │   ├── http.go           # HTTP 服务（Batch API）
@@ -142,6 +154,7 @@ detect-agent/
 │   │   └── response.go       # 统一响应编码器
 │   └── service/              # 服务实现层
 │       ├── service.go        # Wire ProviderSet
+│       ├── service_test.go   # 服务层单元测试
 │       └── batch.go          # Batch 服务实现
 └── go.mod
 ```
@@ -173,7 +186,7 @@ detect-agent/
 - Go 1.26+
 - Nacos 服务
 - Kafka 集群
-- 安装 Chromium 内核浏览器（Chrome/Edge/360/UC/Quark/搜狗）
+- 安装 Chromium 内核浏览器（Chrome/Edge/360/UC/Quark/QQ 浏览器）
 
 ### 配置
 
@@ -214,27 +227,38 @@ make build
 - 健康检查端点 (`HealthCheckUrl`)
 - 进程 & 端口管理
 - 正在探测/已完成探测的任务计数
+- **Tab 池**：预创建的 50 个可复用操作 Tab
 
 **探测流程**：
 1. 通过 CDP WebSocket 连接到已有浏览器实例
-2. 创建新 Tab（Target）
-3. 监听网络事件（Request、Response、LoadingFailed）
-4. 导航到目标 URL，设置 400ms 超时
+2. 从 Tab 池中取出一个空闲 Tab
+3. 通过 `TabDetector` 监听网络事件（Request、Response、LoadingFailed）
+4. 使用 `page.Navigate` 导航到目标 URL，设置 400ms 超时
 5. 检查是否存在 `ERR_BLOCKED` 错误，判断是否被拦截
-6. 返回拦截状态 + 网络事件详情
+6. 返回拦截状态 + 网络事件详情（JSON 格式）
+7. 探测完成后 Tab 归还到池中复用
+
+### TabDetector - Tab 探测器
+
+`browser_tab.go` 中定义的核心网络事件监听器：
+- 内置 `NetworkEvent` 结构：记录网络请求的类型、URL、方法、状态码、错误信息
+- 通过 `chromedp.ListenTarget` 注册为 CDP Target 的事件监听器
+- 监听 `EventRequestWillBeSent`、`EventResponseReceived`、`EventLoadingFailed`
+- 当检测到拦截错误（包含 `ERR_BLOCKED` 关键字）时，通过 `channel` 信号提前唤醒等待的探测任务
 
 ### BrowserHerd - 浏览器集群
 
 单个浏览器类型的集群管理器：
 - **浏览器池**：维护 N+1 个实例（N 为活跃数，1 为冷备）
-- **端口分配**：自动从指定端口范围（如 9000-9009）中分配可用端口
-- **生命周期**：创建 → 健康检查 → 替换 → 销毁
+- **端口分配**：自动从指定端口范围中分配可用端口
+- **生命周期**：创建 → Tab池初始化 → 健康检查 → 替换 → 关闭Tab池 → 销毁
+- **最大探测次数**：单个浏览器实例最多处理 100,000 次探测后自动替换
 
 ### BrowserShepherd - 浏览器群管理者
 
 管理所有 6 种浏览器的集群，提供：
-- `GetAvailableBrowser(appType)` - 获取一个空闲浏览器实例（随机选取 + 负载均衡）
-- `ReleaseBrowser(appType, browser)` - 释放浏览器，更新计数，超限自动替换
+- `GetAvailableBrowserTab(appType)` - 获取一个空闲浏览器及其可用 Tab（负载均衡 + 冷备激活策略）
+- `ReleaseBrowserTab(appType, browser, tab)` - 释放浏览器和 Tab，更新计数，超限自动替换
 - `StartMonitor(ctx)` - 定时健康检查守护协程
 - `HerdHealthCheck(herd)` - 对单个集群执行健康检查并自动恢复
 
@@ -244,6 +268,7 @@ Kafka 消息驱动的探测引擎：
 - 消费批量探测消息，每条消息触发一次 URL 探测
 - 并发处理（每个探测任务独立 goroutine）
 - 结果回写到 Kafka 结果 Topic
+- 支持批处理模式，提升吞吐量
 
 ---
 
@@ -268,7 +293,7 @@ Kafka 消息驱动的探测引擎：
                               ├──► 360 浏览器探测
                               ├──► UC 浏览器探测
                               ├──► Quark 浏览器探测
-                              └──► Sogou 浏览器探测
+                              └──► QQ 浏览器探测
 ```
 
 ---
@@ -307,7 +332,6 @@ browser_herd_size: 3  # 每种浏览器保留的实例数
 
 - `gitlab.gainetics.io/backend-cdn/go-protos/probe-executor` - 探针执行器协议
 - `gitlab.gainetics.io/shared/go-common/go-nacos-cli` - Nacos 客户端封装
-- `gitlab.gainetics.io/shared/proto-hub/cloud-iam` - IAM 认证协议
 - `gitlab.gainetics.io/shared/proto-hub/observable/batch` - 批量探测协议
 
 ---
