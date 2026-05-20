@@ -98,7 +98,7 @@ func (h *ChromiumBatchHandler) HandleBatch(ctx context.Context, keys [][]byte, v
 			newCtx, cancel := context.WithTimeout(ctx, time.Duration(msg.GetTimeoutSec())*time.Second)
 			defer cancel()
 
-			browser, err := h.handler.browserShepherd.GetAvailableBrowser(h.appType)
+			browser, tab, err := h.handler.browserShepherd.GetAvailableBrowserTab(h.appType)
 			if err != nil {
 				h.handler.logger.Errorf("HandleBatch get available browser failed: %v", err)
 				output.Error = err.Error()
@@ -106,9 +106,9 @@ func (h *ChromiumBatchHandler) HandleBatch(ctx context.Context, keys [][]byte, v
 				h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic)
 				return
 			}
-			defer h.handler.browserShepherd.ReleaseBrowser(h.appType, browser)
+			defer h.handler.browserShepherd.ReleaseBrowserTab(h.appType, browser, tab)
 
-			blocked, detail, err := browser.ChromiumDetect(newCtx, param.Url)
+			blocked, detail, err := browser.ChromiumDetect(newCtx, tab, param.Url)
 			output.RawResult = detail
 			if err != nil {
 				h.handler.logger.Errorf("HandleBatch detect browser failed: %v", err)

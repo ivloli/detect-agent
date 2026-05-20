@@ -98,9 +98,6 @@ func ConfigChangeCallback(namespace, group, dataId, data string, target interfac
 type ConfigData struct {
 	Server Server `json:"server"`
 
-	// 单种浏览器要维护的实例数
-	BrowserHerdSize int `json:"browser_herd_size" yaml:"browser_herd_size"`
-
 	// GrpcClients 各种gRPC客户端配置
 	GrpcClients *GrpcClients `yaml:"grpc_clients" json:"grpc_clients"`
 
