@@ -461,6 +461,10 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body, url required"})
 			return
 		}
+		if strings.TrimSpace(req.TabID) != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "/tabs/open does not accept tabId, use /tabs/reuse"})
+			return
+		}
 		svc.mu.Lock()
 		defer svc.mu.Unlock()
 		if svc.cfg.Serial == "" {
@@ -490,20 +494,9 @@ func main() {
 			}
 		}
 
-		if strings.TrimSpace(req.TabID) != "" {
-			if !hasTabID(tabsBefore, req.TabID) {
-				writeJSON(w, http.StatusNotFound, map[string]any{"error": "tab id not found", "tabId": req.TabID})
-				return
-			}
-			if err := svc.navigateByTabID(req.TabID, req.URL); err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]any{"error": "navigate by tab id failed", "detail": err.Error(), "tabId": req.TabID})
-				return
-			}
-		} else {
-			if err := svc.openURL(req.URL); err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
-				return
-			}
+		if err := svc.openURL(req.URL); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
 		}
 		time.Sleep(1500 * time.Millisecond)
 		tabs, err := svc.fetchTabsLocked()
