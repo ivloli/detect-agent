@@ -37,28 +37,11 @@ func NewChromiumHerd(logger log.Logger, binaryPath, profilePath string, minPort 
 	exeName := segments[len(segments)-1]
 	exec.Command("taskkill", "/F", "/IM", exeName).Run()
 
-	// 2. 把浏览器配置文件复制一份出来
-	browserName := strings.TrimSuffix(exeName, ".exe")
-	tmpProfile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d", browserName, time.Now().Unix()))
-	copyCmd := exec.Command("robocopy", profilePath, tmpProfile, "/MIR")
-
-	// robocopy比较特殊： 0~7 都算成功
-	err := copyCmd.Run()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code := exitErr.ExitCode()
-			if code > 7 {
-				panic(fmt.Sprintf("robocopy failed: %v", err))
-			}
-		} else {
-			panic(err)
-		}
-	}
 	herd := &BrowserHerd{
 		logger:            log.NewHelper(log.With(logger, "module", "browser_herd/")),
 		mu:                sync.Mutex{},
 		binaryPath:        binaryPath,
-		userDataPath:      tmpProfile,
+		userDataPath:      profilePath,
 		minPort:           minPort,
 		maxPort:           maxPort,
 		availableBrowsers: make([]*Browser, 0, DefaultBrowserHerdSize),
@@ -88,10 +71,30 @@ func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper) (b *Browser, er
 	if port == -1 {
 		return nil, fmt.Errorf("unable to find available port")
 	}
+
+	// 把浏览器配置文件复制一份出来
+	segments := strings.Split(h.userDataPath, "\\")
+	baseName := segments[len(segments)-1]
+	tmpProfile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d", baseName, time.Now().Unix()))
+	copyCmd := exec.Command("robocopy", h.userDataPath, tmpProfile, "/MIR")
+
+	// robocopy比较特殊： 0~7 都算成功
+	err = copyCmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code := exitErr.ExitCode()
+			if code > 7 {
+				panic(fmt.Sprintf("robocopy failed: %v", err))
+			}
+		} else {
+			panic(err)
+		}
+	}
+
 	cmd := exec.Command(
 		h.binaryPath,
 		fmt.Sprintf("--remote-debugging-port=%d", port),
-		fmt.Sprintf(`--user-data-dir=%s`, h.userDataPath),
+		fmt.Sprintf(`--user-data-dir=%s`, tmpProfile),
 	)
 
 	err = cmd.Start()
