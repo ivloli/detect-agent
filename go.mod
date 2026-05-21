@@ -50,6 +50,7 @@ require (
 	github.com/google/gnostic v0.7.1 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af // indirect
 	github.com/json-iterator/go v1.1.6 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect

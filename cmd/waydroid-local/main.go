@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type config struct {
@@ -293,14 +295,63 @@ func (s *service) navigateByTabID(tabID, targetURL string) error {
 	if err != nil {
 		return err
 	}
-	if !hasTabID(tabs, tabID) {
+	wsURL := tabWSURL(tabs, tabID)
+	if strings.TrimSpace(wsURL) == "" {
 		return fmt.Errorf("tab id not found: %s", tabID)
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("dial tab websocket failed: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := cdpCall(conn, 1, "Page.enable", nil); err != nil {
+		return fmt.Errorf("Page.enable failed: %w", err)
+	}
+	if _, err := cdpCall(conn, 2, "Runtime.enable", nil); err != nil {
+		return fmt.Errorf("Runtime.enable failed: %w", err)
+	}
+	if _, err := cdpCall(conn, 3, "Page.navigate", map[string]any{"url": targetURL}); err != nil {
+		return fmt.Errorf("Page.navigate failed: %w", err)
 	}
 	if err := s.activateTab(tabID); err != nil {
 		return err
 	}
-	time.Sleep(200 * time.Millisecond)
-	return s.openURL(targetURL)
+	return nil
+}
+
+func cdpCall(conn *websocket.Conn, id int, method string, params map[string]any) (map[string]any, error) {
+	if params == nil {
+		params = map[string]any{}
+	}
+	req := map[string]any{"id": id, "method": method, "params": params}
+	if err := conn.WriteJSON(req); err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(6 * time.Second))
+	for {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			return nil, err
+		}
+		rawID, ok := msg["id"]
+		if !ok {
+			continue
+		}
+		msgID, ok := rawID.(float64)
+		if !ok || int(msgID) != id {
+			continue
+		}
+		if e, ok := msg["error"]; ok {
+			return nil, fmt.Errorf("cdp error: %v", e)
+		}
+		res, _ := msg["result"].(map[string]any)
+		if res == nil {
+			res = map[string]any{}
+		}
+		return res, nil
+	}
 }
 
 func (s *service) openURL(url string) error {
