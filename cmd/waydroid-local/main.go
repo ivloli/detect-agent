@@ -33,6 +33,7 @@ type service struct {
 	cfg    config
 	mu     sync.Mutex
 	socket string
+	busy   map[string]bool
 }
 
 type openReq struct {
@@ -234,6 +235,57 @@ func toTabItems(tabs []map[string]any) []tabItem {
 	return out
 }
 
+func pageTabIDs(tabs []map[string]any) []string {
+	out := make([]string, 0)
+	for _, t := range tabs {
+		if strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+			id := fmt.Sprintf("%v", t["id"])
+			if id != "" && id != "<nil>" {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+func (s *service) syncBusyMap(tabs []map[string]any) {
+	if s.busy == nil {
+		s.busy = map[string]bool{}
+	}
+	alive := map[string]struct{}{}
+	for _, id := range pageTabIDs(tabs) {
+		alive[id] = struct{}{}
+		if _, ok := s.busy[id]; !ok {
+			s.busy[id] = false
+		}
+	}
+	for id := range s.busy {
+		if _, ok := alive[id]; !ok {
+			delete(s.busy, id)
+		}
+	}
+}
+
+func (s *service) pickIdleTab(tabs []map[string]any) string {
+	s.syncBusyMap(tabs)
+	for _, id := range pageTabIDs(tabs) {
+		if busy, ok := s.busy[id]; ok && !busy {
+			return id
+		}
+	}
+	return ""
+}
+
+func (s *service) markBusy(tabID string, busy bool) {
+	if strings.TrimSpace(tabID) == "" {
+		return
+	}
+	if s.busy == nil {
+		s.busy = map[string]bool{}
+	}
+	s.busy[tabID] = busy
+}
+
 func hasTabID(tabs []map[string]any, id string) bool {
 	for _, t := range tabs {
 		if fmt.Sprintf("%v", t["id"]) == id {
@@ -394,7 +446,7 @@ func main() {
 	flag.BoolVar(&cfg.AutoReset, "auto-reset-forward", true, "remove and remap only this local tcp port when socket changes")
 	flag.Parse()
 
-	svc := &service{cfg: cfg}
+	svc := &service{cfg: cfg, busy: map[string]bool{}}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -479,24 +531,48 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		if svc.cfg.MaxTabs > 0 && countPageTabs(tabsBefore) >= svc.cfg.MaxTabs {
-			if strings.TrimSpace(req.TabID) == "" {
-				writeJSON(w, http.StatusConflict, map[string]any{
-					"error":    "max tabs reached",
-					"maxTabs":  svc.cfg.MaxTabs,
-					"pageTabs": countPageTabs(tabsBefore),
-					"serial":   svc.cfg.Serial,
-					"socket":   svc.socket,
-					"port":     svc.cfg.Port,
-					"tabs":     tabsBefore,
-				})
+		selectedTabID := strings.TrimSpace(req.TabID)
+		strategy := "new"
+
+		if selectedTabID == "" {
+			if svc.cfg.MaxTabs > 0 && countPageTabs(tabsBefore) >= svc.cfg.MaxTabs {
+				idle := svc.pickIdleTab(tabsBefore)
+				if idle == "" {
+					writeJSON(w, http.StatusConflict, map[string]any{
+						"error":    "max tabs reached and no idle tab",
+						"maxTabs":  svc.cfg.MaxTabs,
+						"pageTabs": countPageTabs(tabsBefore),
+						"serial":   svc.cfg.Serial,
+						"socket":   svc.socket,
+						"port":     svc.cfg.Port,
+						"tabs":     tabsBefore,
+						"items":    toTabItems(tabsBefore),
+					})
+					return
+				}
+				selectedTabID = idle
+				strategy = "reuse_idle"
+			}
+		} else {
+			if !hasTabID(tabsBefore, selectedTabID) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "tab id not found", "tabId": selectedTabID})
 				return
 			}
+			strategy = "reuse_specified"
 		}
 
-		if err := svc.openURL(req.URL); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
-			return
+		if selectedTabID != "" {
+			svc.markBusy(selectedTabID, true)
+			defer svc.markBusy(selectedTabID, false)
+			if err := svc.navigateByTabID(selectedTabID, req.URL); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": "navigate by tab id failed", "detail": err.Error(), "tabId": selectedTabID})
+				return
+			}
+		} else {
+			if err := svc.openURL(req.URL); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+				return
+			}
 		}
 		time.Sleep(1500 * time.Millisecond)
 		tabs, err := svc.fetchTabsLocked()
@@ -504,7 +580,18 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs, Items: toTabItems(tabs)})
+		svc.syncBusyMap(tabs)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"serial":    svc.cfg.Serial,
+			"socket":    svc.socket,
+			"port":      svc.cfg.Port,
+			"maxTabs":   svc.cfg.MaxTabs,
+			"pageTabs":  countPageTabs(tabs),
+			"strategy":  strategy,
+			"tabId":     selectedTabID,
+			"tabs":      tabs,
+			"items":     toTabItems(tabs),
+		})
 	})
 
 	mux.HandleFunc("/tabs/reuse", func(w http.ResponseWriter, r *http.Request) {
