@@ -36,7 +36,8 @@ go run ./cmd/waydroid-local \
   --listen :18080 \
   --serial 192.168.240.112:5555 \
   --package com.mi.globalbrowser \
-  --port 9222
+  --port 9222 \
+  --max-tabs 3
 ```
 
 ## Start (Vivo browser example)
@@ -48,7 +49,8 @@ go run ./cmd/waydroid-local \
   --listen :18081 \
   --serial 192.168.240.112:5555 \
   --package com.vivo.browser \
-  --port 9322
+  --port 9322 \
+  --max-tabs 3
 ```
 
 Tip: run Mi and Vivo in different local ports to avoid collisions.
@@ -76,6 +78,13 @@ curl -s -X POST http://127.0.0.1:18080/tabs/open \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 ```
+
+If page tabs already reach `max-tabs`, this endpoint returns `409` with:
+
+- `error = "max tabs reached"`
+- `maxTabs`
+- `pageTabs`
+- current `tabs`
 
 ### 4) Mock Kafka consume/writeback schema locally (without Kafka)
 

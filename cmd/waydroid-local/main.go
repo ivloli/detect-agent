@@ -20,6 +20,7 @@ type config struct {
 	Listen        string
 	Serial        string
 	Port          int
+	MaxTabs       int
 	PackageName   string
 	SocketPattern string
 	AutoReset     bool
@@ -36,10 +37,12 @@ type openReq struct {
 }
 
 type listResp struct {
-	Serial string           `json:"serial"`
-	Socket string           `json:"socket"`
-	Port   int              `json:"port"`
-	Tabs   []map[string]any `json:"tabs"`
+	Serial   string           `json:"serial"`
+	Socket   string           `json:"socket"`
+	Port     int              `json:"port"`
+	MaxTabs  int              `json:"maxTabs"`
+	PageTabs int              `json:"pageTabs"`
+	Tabs     []map[string]any `json:"tabs"`
 }
 
 // Mock input shape aligned with kafka consumed TaskCreateRequest (key fields only).
@@ -170,6 +173,16 @@ func (s *service) fetchTabsLocked() ([]map[string]any, error) {
 	return tabs, nil
 }
 
+func countPageTabs(tabs []map[string]any) int {
+	n := 0
+	for _, t := range tabs {
+		if strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *service) openURL(url string) error {
 	_, err := run("adb", "-s", s.cfg.Serial, "shell", "am", "start", "-n", s.cfg.PackageName+"/com.android.browser.BrowserActivity", "-a", "android.intent.action.VIEW", "-d", url)
 	if err == nil {
@@ -194,6 +207,7 @@ func main() {
 	flag.StringVar(&cfg.Listen, "listen", ":18080", "http listen address")
 	flag.StringVar(&cfg.Serial, "serial", "", "adb serial (optional, auto-pick first device)")
 	flag.IntVar(&cfg.Port, "port", 9322, "local forwarded CDP port")
+	flag.IntVar(&cfg.MaxTabs, "max-tabs", 0, "max allowed page tabs (0 means unlimited)")
 	flag.StringVar(&cfg.PackageName, "package", "com.mi.globalbrowser", "target browser package")
 	flag.StringVar(&cfg.SocketPattern, "socket-pattern", "devtools_remote|webview_devtools_remote", "regex for socket detect")
 	flag.BoolVar(&cfg.AutoReset, "auto-reset-forward", true, "remove and remap only this local tcp port when socket changes")
@@ -230,7 +244,7 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, Tabs: tabs})
+		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs})
 	})
 
 	mux.HandleFunc("/tabs/open", func(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +266,24 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "no adb device found"})
 			return
 		}
+		tabsBefore, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		if svc.cfg.MaxTabs > 0 && countPageTabs(tabsBefore) >= svc.cfg.MaxTabs {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":    "max tabs reached",
+				"maxTabs":  svc.cfg.MaxTabs,
+				"pageTabs": countPageTabs(tabsBefore),
+				"serial":   svc.cfg.Serial,
+				"socket":   svc.socket,
+				"port":     svc.cfg.Port,
+				"tabs":     tabsBefore,
+			})
+			return
+		}
+
 		if err := svc.openURL(req.URL); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
@@ -262,7 +294,7 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, Tabs: tabs})
+		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs})
 	})
 
 	// /mock/consume: local endpoint to verify kafka input/output schema without real kafka.
@@ -311,6 +343,16 @@ func main() {
 
 		time.Sleep(1500 * time.Millisecond)
 		tabs, err := svc.fetchTabsLocked()
+		if err == nil && svc.cfg.MaxTabs > 0 && countPageTabs(tabs) > svc.cfg.MaxTabs {
+			result := buildMockNodeMessage(req, 500, "max tabs reached", "", map[string]any{
+				"app":       svc.cfg.PackageName,
+				"status":    "FAIL",
+				"error":     "max tabs reached",
+				"rawResult": fmt.Sprintf(`{"maxTabs":%d,"pageTabs":%d}`, svc.cfg.MaxTabs, countPageTabs(tabs)),
+			})
+			writeJSON(w, http.StatusOK, result)
+			return
+		}
 		if err != nil {
 			// socket exists but /json/list unusable => capability downgrade
 			result := buildMockNodeMessage(req, 200, "", "", map[string]any{
@@ -372,7 +414,7 @@ func main() {
 	}
 
 	fmt.Printf("waydroid-local listening on %s\n", cfg.Listen)
-	fmt.Printf("package=%s cdp-port=%d serial=%s\n", cfg.PackageName, cfg.Port, cfg.Serial)
+	fmt.Printf("package=%s cdp-port=%d serial=%s max-tabs=%d\n", cfg.PackageName, cfg.Port, cfg.Serial, cfg.MaxTabs)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		panic(err)
 	}
