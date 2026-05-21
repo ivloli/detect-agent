@@ -3,7 +3,6 @@ package biz
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -27,31 +26,13 @@ func NewBrowserShepherd(logger log.Logger) *BrowserShepherd {
 	bs := &BrowserShepherd{
 		logger: log.NewHelper(log.With(logger, "module", "browser_shepherd/")),
 	}
-	// chrome和edge有点特殊，和其他浏览器一起并行初始化的时候，tab创建不出来
+	// 并行初始化的时候，tab创建有问题，先串行
 	bs.HerdChrome = NewChromiumHerd(logger, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\browserprofile\\chrome", 9000, 9009)
 	bs.HerdEdge = NewChromiumHerd(logger, "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\browserprofile\\edge", 9010, 9019)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bs.Herd360 = NewChromiumHerd(logger, "C:\\Users\\Administrator\\AppData\\Local\\360ChromeX\\Chrome\\Application\\360ChromeX.exe", "C:\\browserprofile\\360", 9020, 9029)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bs.HerdUC = NewChromiumHerd(logger, "C:\\Program Files\\UCBrowser\\uc.exe", "C:\\browserprofile\\uc", 9030, 9039)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bs.HerdQuark = NewChromiumHerd(logger, "C:\\Program Files\\Quark\\quark.exe", "C:\\browserprofile\\quark", 9040, 9049)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bs.HerdQQ = NewChromiumHerd(logger, "C:\\Program Files\\Tencent\\QQBrowser\\QQBrowser.exe", "C:\\browserprofile\\qq", 9050, 9059)
-	}()
-	wg.Wait()
+	bs.Herd360 = NewChromiumHerd(logger, "C:\\Users\\Administrator\\AppData\\Local\\360ChromeX\\Chrome\\Application\\360ChromeX.exe", "C:\\browserprofile\\360", 9020, 9029)
+	bs.HerdUC = NewChromiumHerd(logger, "C:\\Program Files\\UCBrowser\\uc.exe", "C:\\browserprofile\\uc", 9030, 9039)
+	bs.HerdQuark = NewChromiumHerd(logger, "C:\\Program Files\\Quark\\quark.exe", "C:\\browserprofile\\quark", 9040, 9049)
+	bs.HerdQQ = NewChromiumHerd(logger, "C:\\Program Files\\Tencent\\QQBrowser\\QQBrowser.exe", "C:\\browserprofile\\qq", 9050, 9059)
 	return bs
 }
 
@@ -90,16 +71,18 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 			break
 		}
 	}
-	defer func() {
-
-	}()
 	if targetBrowser == nil {
 		if herd.standBy != nil {
+			err = herd.standBy.InitTabPool()
+			if err != nil {
+				s.logger.Errorf("failed to init standBy tab pool: %v", err)
+				return nil, nil, err
+			}
 			targetBrowser = herd.standBy
-			herd.standBy = nil
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
+			herd.standBy = nil
 			go func() {
-				newInstance, err := herd.CreateChromiumInstance(herd.logger)
+				newInstance, err := herd.CreateChromiumInstance(herd.logger, true)
 				if err != nil {
 					panic(err)
 				}
@@ -112,13 +95,18 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 		}
 	}
 	targetBrowser.DetectingJobNum++
-	// 如果当前实例已经探测过80%最大次数，启用冷备，异步创建一个新的冷备
-	if targetBrowser.DetectedJobNum+targetBrowser.DetectingJobNum >= BrowserMaxDetectNum*0.8 &&
+	// 如果当前实例已经探测过90%最大次数，启用冷备，异步创建一个新的冷备
+	if targetBrowser.DetectedJobNum+targetBrowser.DetectingJobNum >= BrowserMaxDetectNum*0.9 &&
 		len(herd.availableBrowsers) == DefaultBrowserHerdSize && herd.standBy != nil {
+		err = herd.standBy.InitTabPool()
+		if err != nil {
+			s.logger.Errorf("failed to init standBy tab pool: %v", err)
+			return nil, nil, err
+		}
 		herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 		herd.standBy = nil
 		go func() {
-			newInstance, err := herd.CreateChromiumInstance(herd.logger)
+			newInstance, err := herd.CreateChromiumInstance(herd.logger, true)
 			if err != nil {
 				panic(err)
 			}
@@ -169,10 +157,15 @@ func (s *BrowserShepherd) ReleaseBrowserTab(appType probecomm.InterceptAppType, 
 			go herd.KillChromiumInstance(browser)
 		} else if herd.standBy != nil {
 			// 把备用补充进来，并创建新的备用
+			err = herd.standBy.InitTabPool()
+			if err != nil {
+				s.logger.Errorf("failed to init standBy tab pool: %v", err)
+				return err
+			}
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 			herd.standBy = nil
 			go func() {
-				herd.standBy, err = herd.CreateChromiumInstance(herd.logger)
+				herd.standBy, err = herd.CreateChromiumInstance(herd.logger, true)
 				if err != nil {
 					panic(err)
 				}
@@ -220,7 +213,7 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 	_, err := herd.BrowserHealthCheck(herd.standBy)
 	if err != nil {
 		s.logger.Infof("standby browser unhealthy: %v, try to recover", err)
-		b, err := herd.CreateChromiumInstance(herd.logger)
+		b, err := herd.CreateChromiumInstance(herd.logger, true)
 		if err != nil {
 			panic(err)
 		}
@@ -240,10 +233,15 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 			s.logger.Infof("available browser unhealthy: %v, try to replace with standby", err)
 			old := herd.availableBrowsers[i]
 			herd.mu.Lock()
+			err = herd.standBy.InitTabPool()
+			if err != nil {
+				s.logger.Errorf("failed to init standBy tab pool: %v", err)
+				return err
+			}
 			herd.availableBrowsers[i] = herd.standBy
 			herd.standBy = nil
 			herd.mu.Unlock()
-			b, err := herd.CreateChromiumInstance(herd.logger)
+			b, err := herd.CreateChromiumInstance(herd.logger, true)
 			if err != nil {
 				panic(err)
 			}

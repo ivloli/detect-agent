@@ -47,21 +47,23 @@ func NewChromiumHerd(logger log.Logger, binaryPath, profilePath string, minPort 
 		availableBrowsers: make([]*Browser, 0, DefaultBrowserHerdSize),
 		standBy:           nil,
 	}
-	browsers := make([]*Browser, 0, DefaultBrowserHerdSize+1)
-	for i := 0; i < DefaultBrowserHerdSize+1; i++ {
-		b, err := herd.CreateChromiumInstance(herd.logger)
+	for i := 0; i < DefaultBrowserHerdSize; i++ {
+		b, err := herd.CreateChromiumInstance(herd.logger, false)
 		if err != nil {
 			panic(err)
 		}
-		browsers = append(browsers, b)
+		herd.availableBrowsers = append(herd.availableBrowsers, b)
 	}
-	herd.availableBrowsers = browsers[:len(browsers)-1]
-	herd.standBy = browsers[len(browsers)-1]
+	b, err := herd.CreateChromiumInstance(herd.logger, true)
+	if err != nil {
+		panic(err)
+	}
+	herd.standBy = b
 	return herd
 }
 
-// CreateChromiumInstance 创建chromium内核浏览器实例
-func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper) (b *Browser, err error) {
+// CreateChromiumInstance 创建chromium内核浏览器实例，冷备在实际转正的时候建tab
+func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper, isStandBy bool) (b *Browser, err error) {
 	defer func() {
 		if err != nil && b != nil {
 			h.KillChromiumInstance(b)
@@ -137,7 +139,9 @@ func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper) (b *Browser, er
 		return nil, err
 	}
 	b.AttachUrl = attachUrl
-	err = b.InitTabPool()
+	if !isStandBy {
+		err = b.InitTabPool()
+	}
 	return b, nil
 }
 

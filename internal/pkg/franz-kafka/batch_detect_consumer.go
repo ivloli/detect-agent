@@ -142,7 +142,15 @@ func (c *BatchDetectConsumer) consumeLoop() {
 		}
 
 		if errs := fetches.Errors(); len(errs) > 0 {
-			c.logger.Error("拉取消息时发生错误", zap.String("consumer", c.consumerName), zap.Any("errors", errs))
+			for i, fetchErr := range errs {
+				c.logger.Error("拉取消息时发生错误",
+					zap.String("consumer", c.consumerName),
+					zap.Int("error_index", i),
+					zap.String("topic", fetchErr.Topic),
+					zap.Int32("partition", fetchErr.Partition),
+					zap.Error(fetchErr.Err),
+				)
+			}
 		}
 
 		iter := fetches.RecordIter()
