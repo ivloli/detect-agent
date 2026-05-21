@@ -6,6 +6,7 @@ import (
 	"detect-agent/internal/pkg/franz-kafka"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -27,6 +28,7 @@ type BatchDetectHandler struct {
 	logger          *log.Helper
 	producer        *franz_kafka.KafkaProducer
 	browserShepherd *BrowserShepherd
+	runtimeAdapter  *WaydroidAdapter
 }
 
 // NewBatchDetectHandler 创建批量探测处理器
@@ -34,11 +36,13 @@ func NewBatchDetectHandler(
 	logger log.Logger,
 	producer *franz_kafka.KafkaProducer,
 	browserShepherd *BrowserShepherd,
+	runtimeAdapter *WaydroidAdapter,
 ) *BatchDetectHandler {
 	return &BatchDetectHandler{
 		logger:          log.NewHelper(log.With(logger, "module", "biz/batch_detect_handler")),
 		producer:        producer,
 		browserShepherd: browserShepherd,
+		runtimeAdapter:  runtimeAdapter,
 	}
 }
 
@@ -90,28 +94,54 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 	newCtx, cancel := context.WithTimeout(ctx, time.Duration(msg.GetTimeoutSec())*time.Second)
 	defer cancel()
 
-	browser, tab, err := h.handler.browserShepherd.GetAvailableBrowserTab(h.appType)
-	if err != nil {
-		h.handler.logger.Errorf("Handle get available browser failed: %v", err)
-		output.Error = err.Error()
-		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-		h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic)
-		return nil
-	}
-	defer h.handler.browserShepherd.ReleaseBrowserTab(h.appType, browser, tab)
+	var (
+		blocked bool
+		detail  string
+	)
 
-	blocked, detail, err := browser.ChromiumDetect(newCtx, tab, param.Url)
-	output.RawResult = detail
-	if err != nil {
-		h.handler.logger.Errorf("Handle detect browser failed: %v", err)
-		output.Error = err.Error()
-		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-		h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic)
-		return nil
+	if h.handler.runtimeAdapter != nil && h.handler.runtimeAdapter.Enabled() {
+		cap, b, d, err := h.handler.runtimeAdapter.Detect(newCtx, h.appType, param.Url)
+		if err != nil {
+			h.handler.logger.Errorf("Handle detect via waydroid adapter failed: %v", err)
+			output.Error = err.Error()
+			output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+			h.sendResult(ctx, msg, output, CodeError, "detect on waydroid adapter failed", err.Error(), resTopic)
+			return nil
+		}
+		blocked = b
+		detail = d
+		if cap != CapabilityCDPFull {
+			output.Error = fmt.Sprintf("capability=%s", cap)
+		}
+	} else {
+		browser, tab, err := h.handler.browserShepherd.GetAvailableBrowserTab(h.appType)
+		if err != nil {
+			h.handler.logger.Errorf("Handle get available browser failed: %v", err)
+			output.Error = err.Error()
+			output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+			h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic)
+			return nil
+		}
+		defer h.handler.browserShepherd.ReleaseBrowserTab(h.appType, browser, tab)
+
+		blocked, detail, err = browser.ChromiumDetect(newCtx, tab, param.Url)
+		if err != nil {
+			h.handler.logger.Errorf("Handle detect browser failed: %v", err)
+			output.Error = err.Error()
+			output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+			h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic)
+			return nil
+		}
 	}
+
+	output.RawResult = detail
 	if blocked {
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_BLOCKED
 	} else {
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL
+	}
+	if strings.TrimSpace(output.Error) != "" && output.Status == localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL {
+		// capability info only, not execution failure.
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL
 	}
 	h.sendResult(ctx, msg, output, CodeSuccess, "", "", resTopic)

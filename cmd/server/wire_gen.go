@@ -32,7 +32,8 @@ func wireApp(nacos *conf.Nacos, logger log.Logger) (*kratos.App, func(), error) 
 		return nil, nil, err
 	}
 	browserShepherd := biz.NewBrowserShepherd(logger)
-	batchDetectHandler := biz.NewBatchDetectHandler(logger, kafkaProducer, browserShepherd)
+	waydroidAdapter := biz.NewWaydroidAdapter(logger)
+	batchDetectHandler := biz.NewBatchDetectHandler(logger, kafkaProducer, browserShepherd, waydroidAdapter)
 	kafkaServer := server.NewKafkaServer(batchDetectHandler, logger)
 	registrar := server.NewRegistryEngine(nacos, logger)
 	nodeReporter := biz.NewNodeReporter(logger, kafkaProducer, browserShepherd)

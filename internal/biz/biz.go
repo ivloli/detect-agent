@@ -10,6 +10,7 @@ import (
 var ProviderSet = wire.NewSet(
 	// 批量探测处理器
 	NewBatchDetectHandler,
+	NewWaydroidAdapter,
 	NewBrowserShepherd,
 	NewNodeReporter,
 )

@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -26,7 +27,11 @@ func NewBrowserShepherd(logger log.Logger) *BrowserShepherd {
 	bs := &BrowserShepherd{
 		logger: log.NewHelper(log.With(logger, "module", "browser_shepherd/")),
 	}
-	// 并行初始化的时候，tab创建有问题，先串行
+	if stringsEqualFoldAny(os.Getenv("DETECT_AGENT_WAYDROID_ENABLED"), "1", "true") {
+		bs.logger.Info("waydroid mode enabled, skip desktop chromium herd bootstrap")
+		return bs
+	}
+	// 并行初始化时 tab 创建存在不稳定，保持串行初始化。
 	bs.HerdChrome = NewChromiumHerd(logger, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\browserprofile\\chrome", 9000, 9009)
 	bs.HerdEdge = NewChromiumHerd(logger, "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\browserprofile\\edge", 9010, 9019)
 	bs.Herd360 = NewChromiumHerd(logger, "C:\\Users\\Administrator\\AppData\\Local\\360ChromeX\\Chrome\\Application\\360ChromeX.exe", "C:\\browserprofile\\360", 9020, 9029)
@@ -36,8 +41,41 @@ func NewBrowserShepherd(logger log.Logger) *BrowserShepherd {
 	return bs
 }
 
+func stringsEqualFoldAny(v string, expects ...string) bool {
+	for _, e := range expects {
+		if len(v) > 0 && len(e) > 0 && (v == e || (len(v) == len(e) && equalFoldASCII(v, e))) {
+			return true
+		}
+	}
+	return false
+}
+
+func equalFoldASCII(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca := a[i]
+		cb := b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
 // StartMonitor 定时检查所有浏览器健康状况，自动恢复不健康的实例
 func (s *BrowserShepherd) StartMonitor(ctx context.Context) {
+	if s.HerdChrome == nil && s.HerdEdge == nil && s.Herd360 == nil && s.HerdUC == nil && s.HerdQuark == nil && s.HerdQQ == nil {
+		s.logger.Info("no desktop herds initialized, skip monitor loop")
+		return
+	}
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -82,7 +120,7 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 			herd.standBy = nil
 			go func() {
-				newInstance, err := herd.CreateChromiumInstance(herd.logger, true)
+				newInstance, err := herd.CreateChromiumInstance(herd.logger)
 				if err != nil {
 					panic(err)
 				}
@@ -106,7 +144,7 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 		herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 		herd.standBy = nil
 		go func() {
-			newInstance, err := herd.CreateChromiumInstance(herd.logger, true)
+			newInstance, err := herd.CreateChromiumInstance(herd.logger)
 			if err != nil {
 				panic(err)
 			}
@@ -165,7 +203,7 @@ func (s *BrowserShepherd) ReleaseBrowserTab(appType probecomm.InterceptAppType, 
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 			herd.standBy = nil
 			go func() {
-				herd.standBy, err = herd.CreateChromiumInstance(herd.logger, true)
+				herd.standBy, err = herd.CreateChromiumInstance(herd.logger)
 				if err != nil {
 					panic(err)
 				}
@@ -196,13 +234,19 @@ func (s *BrowserShepherd) getBrowserHerd(appType probecomm.InterceptAppType) (*B
 
 // GetBrowserDetails 生成当前所有类型浏览器集群详情
 func (s *BrowserShepherd) GetBrowserDetails() []*ctrlplanev1.InterceptNodeDetail {
+	appNum := func(h *BrowserHerd) uint32 {
+		if h == nil {
+			return 0
+		}
+		return uint32(len(h.availableBrowsers))
+	}
 	res := []*ctrlplanev1.InterceptNodeDetail{
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME, AppNum: uint32(len(s.HerdChrome.availableBrowsers))},
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_EDGE, AppNum: uint32(len(s.HerdEdge.availableBrowsers))},
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_360, AppNum: uint32(len(s.Herd360.availableBrowsers))},
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UC, AppNum: uint32(len(s.HerdUC.availableBrowsers))},
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK, AppNum: uint32(len(s.HerdQuark.availableBrowsers))},
-		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ, AppNum: uint32(len(s.HerdQQ.availableBrowsers))},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME, AppNum: appNum(s.HerdChrome)},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_EDGE, AppNum: appNum(s.HerdEdge)},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_360, AppNum: appNum(s.Herd360)},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UC, AppNum: appNum(s.HerdUC)},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK, AppNum: appNum(s.HerdQuark)},
+		{AppName: probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ, AppNum: appNum(s.HerdQQ)},
 	}
 	return res
 }
@@ -213,7 +257,7 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 	_, err := herd.BrowserHealthCheck(herd.standBy)
 	if err != nil {
 		s.logger.Infof("standby browser unhealthy: %v, try to recover", err)
-		b, err := herd.CreateChromiumInstance(herd.logger, true)
+		b, err := herd.CreateChromiumInstance(herd.logger)
 		if err != nil {
 			panic(err)
 		}
@@ -241,7 +285,7 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 			herd.availableBrowsers[i] = herd.standBy
 			herd.standBy = nil
 			herd.mu.Unlock()
-			b, err := herd.CreateChromiumInstance(herd.logger, true)
+			b, err := herd.CreateChromiumInstance(herd.logger)
 			if err != nil {
 				panic(err)
 			}
