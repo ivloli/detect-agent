@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -33,7 +34,22 @@ type service struct {
 }
 
 type openReq struct {
-	URL string `json:"url"`
+	URL   string `json:"url"`
+	TabID string `json:"tabId,omitempty"`
+}
+
+type closeReq struct {
+	TabID string `json:"tabId"`
+}
+
+type tabItem struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	Attached bool   `json:"attached"`
+	Visible  bool   `json:"visible"`
+	State    string `json:"state"`
 }
 
 type listResp struct {
@@ -43,6 +59,7 @@ type listResp struct {
 	MaxTabs  int              `json:"maxTabs"`
 	PageTabs int              `json:"pageTabs"`
 	Tabs     []map[string]any `json:"tabs"`
+	Items    []tabItem        `json:"items"`
 }
 
 // Mock input shape aligned with kafka consumed TaskCreateRequest (key fields only).
@@ -183,6 +200,85 @@ func countPageTabs(tabs []map[string]any) int {
 	return n
 }
 
+func toTabItems(tabs []map[string]any) []tabItem {
+	out := make([]tabItem, 0, len(tabs))
+	for _, t := range tabs {
+		item := tabItem{
+			ID:    fmt.Sprintf("%v", t["id"]),
+			Type:  fmt.Sprintf("%v", t["type"]),
+			Title: fmt.Sprintf("%v", t["title"]),
+			URL:   fmt.Sprintf("%v", t["url"]),
+			State: "unknown",
+		}
+		desc := fmt.Sprintf("%v", t["description"])
+		if desc != "" && desc != "<nil>" {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(desc), &m); err == nil {
+				if v, ok := m["attached"].(bool); ok {
+					item.Attached = v
+				}
+				if v, ok := m["visible"].(bool); ok {
+					item.Visible = v
+				}
+			}
+		}
+		if strings.EqualFold(item.Type, "page") {
+			item.State = "idle"
+		} else {
+			item.State = "non_page"
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func hasTabID(tabs []map[string]any, id string) bool {
+	for _, t := range tabs {
+		if fmt.Sprintf("%v", t["id"]) == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *service) cdpGet(path string) ([]byte, int, error) {
+	if err := s.ensureForwardLocked(); err != nil {
+		return nil, 0, err
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(s.cdpURL() + path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	var payload any
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	body, _ := json.Marshal(payload)
+	return body, resp.StatusCode, nil
+}
+
+func (s *service) closeTab(tabID string) error {
+	_, code, err := s.cdpGet("/json/close/" + url.PathEscape(tabID))
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("close tab http status=%d", code)
+	}
+	return nil
+}
+
+func (s *service) activateTab(tabID string) error {
+	_, code, err := s.cdpGet("/json/activate/" + url.PathEscape(tabID))
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("activate tab http status=%d", code)
+	}
+	return nil
+}
+
 func (s *service) openURL(url string) error {
 	_, err := run("adb", "-s", s.cfg.Serial, "shell", "am", "start", "-n", s.cfg.PackageName+"/com.android.browser.BrowserActivity", "-a", "android.intent.action.VIEW", "-d", url)
 	if err == nil {
@@ -244,7 +340,30 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs})
+		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs, Items: toTabItems(tabs)})
+	})
+
+	mux.HandleFunc("/tabs/stats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		svc.mu.Lock()
+		defer svc.mu.Unlock()
+		tabs, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		pageTabs := countPageTabs(tabs)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"serial":   svc.cfg.Serial,
+			"socket":   svc.socket,
+			"port":     svc.cfg.Port,
+			"maxTabs":  svc.cfg.MaxTabs,
+			"pageTabs": pageTabs,
+			"canOpen":  svc.cfg.MaxTabs == 0 || pageTabs < svc.cfg.MaxTabs,
+		})
 	})
 
 	mux.HandleFunc("/tabs/open", func(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +403,17 @@ func main() {
 			return
 		}
 
+		if strings.TrimSpace(req.TabID) != "" {
+			if !hasTabID(tabsBefore, req.TabID) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "tab id not found", "tabId": req.TabID})
+				return
+			}
+			if err := svc.activateTab(req.TabID); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": "activate tab failed", "detail": err.Error(), "tabId": req.TabID})
+				return
+			}
+		}
+
 		if err := svc.openURL(req.URL); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
@@ -294,7 +424,88 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs})
+		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs, Items: toTabItems(tabs)})
+	})
+
+	mux.HandleFunc("/tabs/close", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		var req closeReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TabID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body, tabId required"})
+			return
+		}
+		svc.mu.Lock()
+		defer svc.mu.Unlock()
+		tabs, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		if !hasTabID(tabs, req.TabID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "tab id not found", "tabId": req.TabID})
+			return
+		}
+		if err := svc.closeTab(req.TabID); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "close tab failed", "detail": err.Error(), "tabId": req.TabID})
+			return
+		}
+		time.Sleep(400 * time.Millisecond)
+		tabsAfter, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabsAfter), Tabs: tabsAfter, Items: toTabItems(tabsAfter)})
+	})
+
+	mux.HandleFunc("/tabs/close-all", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		svc.mu.Lock()
+		defer svc.mu.Unlock()
+		tabs, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		closed := 0
+		failed := make([]map[string]any, 0)
+		for _, t := range tabs {
+			if !strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+				continue
+			}
+			id := fmt.Sprintf("%v", t["id"])
+			if id == "" || id == "<nil>" {
+				continue
+			}
+			if err := svc.closeTab(id); err != nil {
+				failed = append(failed, map[string]any{"id": id, "error": err.Error()})
+				continue
+			}
+			closed++
+		}
+		time.Sleep(400 * time.Millisecond)
+		tabsAfter, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"serial":   svc.cfg.Serial,
+			"socket":   svc.socket,
+			"port":     svc.cfg.Port,
+			"closed":   closed,
+			"failed":   failed,
+			"maxTabs":  svc.cfg.MaxTabs,
+			"pageTabs": countPageTabs(tabsAfter),
+			"tabs":     tabsAfter,
+			"items":    toTabItems(tabsAfter),
+		})
 	})
 
 	// /mock/consume: local endpoint to verify kafka input/output schema without real kafka.

@@ -7,11 +7,13 @@ This runbook verifies `Waydroid + CDP + tab open/list` in `detect-agent` without
 - Runs `cmd/waydroid-local` only.
 - Uses ADB + dynamic devtools socket detection.
 - Remaps one local port (default `9322`) when socket changes.
-- Exposes 3 local APIs:
- - Exposes 4 local APIs:
+- Exposes local APIs:
   - `GET /healthz`
   - `GET /tabs/list`
+  - `GET /tabs/stats`
   - `POST /tabs/open`
+  - `POST /tabs/close`
+  - `POST /tabs/close-all`
   - `POST /mock/consume` (TaskCreateRequest-like input -> NodeMessage-like output)
 
 ## Prerequisites
@@ -85,6 +87,34 @@ If page tabs already reach `max-tabs`, this endpoint returns `409` with:
 - `maxTabs`
 - `pageTabs`
 - current `tabs`
+
+Open URL on a specified tab (best-effort reuse):
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/tabs/open \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","tabId":"<target-id>"}'
+```
+
+### 3.1) Tab stats
+
+```bash
+curl -s http://127.0.0.1:18080/tabs/stats
+```
+
+### 3.2) Close one tab
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/tabs/close \
+  -H 'Content-Type: application/json' \
+  -d '{"tabId":"<target-id>"}'
+```
+
+### 3.3) Close all page tabs
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/tabs/close-all
+```
 
 ### 4) Mock Kafka consume/writeback schema locally (without Kafka)
 
