@@ -111,7 +111,7 @@ func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper) (b *Browser, er
 	}
 	// 浏览器启动过程可能会比较慢，这里等15s
 	waitBrowserReady := func() error {
-		deadline := time.Now().Add(15 * time.Second)
+		deadline := time.Now().Add(time.Minute)
 
 		for time.Now().Before(deadline) {
 			resp, err := http.Get(b.HealthCheckUrl)

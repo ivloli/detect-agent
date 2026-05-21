@@ -17,6 +17,10 @@ func IsPortOccupiedWindows(port int) (bool, error) {
 
 	output, err := cmd.Output()
 	if err != nil {
+		// findstr returns exit code 1 when no match is found (port is not occupied)
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
 		return false, err
 	}
 

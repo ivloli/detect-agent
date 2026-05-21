@@ -15,7 +15,7 @@ import (
 const (
 	BlockErrKeyword    = "ERR_BLOCKED"          // 浏览器拦截报错关键字
 	BlockDetectTimeout = 400 * time.Millisecond // 用比较短的超时来进行探测，浏览器拦截报错很快，不需要等网页完全加载完
-	TabPoolSize        = 50                     // 每个浏览器开50个tab复用
+	TabPoolSize        = 10                     // 每个浏览器开50个tab复用
 )
 
 // Browser 浏览器
