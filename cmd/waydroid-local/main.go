@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -39,6 +40,20 @@ type listResp struct {
 	Socket string           `json:"socket"`
 	Port   int              `json:"port"`
 	Tabs   []map[string]any `json:"tabs"`
+}
+
+// Mock input shape aligned with kafka consumed TaskCreateRequest (key fields only).
+type mockTaskCreateRequest struct {
+	TimeoutSec  int             `json:"timeoutSec"`
+	Deadline    string          `json:"deadline"`
+	Type        string          `json:"type"`
+	PayloadJSON string          `json:"payloadJson"`
+	TaskMeta    json.RawMessage `json:"taskMeta"`
+}
+
+// Inner payload shape aligned with InterceptDetectParam (key field only).
+type mockInterceptParam struct {
+	URL string `json:"url"`
 }
 
 func run(name string, args ...string) (string, error) {
@@ -250,6 +265,84 @@ func main() {
 		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, Tabs: tabs})
 	})
 
+	// /mock/consume: local endpoint to verify kafka input/output schema without real kafka.
+	// input: TaskCreateRequest-like JSON
+	// output: NodeMessage-like JSON
+	mux.HandleFunc("/mock/consume", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+
+		var req mockTaskCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body", "detail": err.Error()})
+			return
+		}
+
+		var param mockInterceptParam
+		if err := json.Unmarshal([]byte(req.PayloadJSON), &param); err != nil || strings.TrimSpace(param.URL) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid payloadJson, require {\"url\":\"...\"}", "detail": errString(err)})
+			return
+		}
+
+		svc.mu.Lock()
+		defer svc.mu.Unlock()
+
+		startedAt := time.Now().UTC()
+		if svc.cfg.Serial == "" {
+			svc.cfg.Serial = firstDevice()
+		}
+		if svc.cfg.Serial == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "no adb device found"})
+			return
+		}
+
+		if err := svc.openURL(param.URL); err != nil {
+			result := buildMockNodeMessage(req, 500, "open url failed", err.Error(), map[string]any{
+				"app":       svc.cfg.PackageName,
+				"status":    "FAIL",
+				"error":     err.Error(),
+				"rawResult": "",
+			})
+			writeJSON(w, http.StatusOK, result)
+			return
+		}
+
+		time.Sleep(1500 * time.Millisecond)
+		tabs, err := svc.fetchTabsLocked()
+		if err != nil {
+			// socket exists but /json/list unusable => capability downgrade
+			result := buildMockNodeMessage(req, 200, "", "", map[string]any{
+				"app":       svc.cfg.PackageName,
+				"status":    "NORMAL",
+				"error":     "capability=CDP_SOCKET_ONLY",
+				"rawResult": fmt.Sprintf(`{"url":%q,"serial":%q,"socket":%q,"port":%d,"error":%q}`, param.URL, svc.cfg.Serial, svc.socket, svc.cfg.Port, err.Error()),
+			})
+			writeJSON(w, http.StatusOK, result)
+			return
+		}
+
+		// Minimal verdict: if list works, treat as NORMAL and return tabs in rawResult.
+		raw, _ := json.Marshal(map[string]any{
+			"url":     param.URL,
+			"serial":  svc.cfg.Serial,
+			"socket":  svc.socket,
+			"port":    svc.cfg.Port,
+			"tabs":    tabs,
+			"started": startedAt.Format(time.RFC3339),
+			"done":    time.Now().UTC().Format(time.RFC3339),
+		})
+
+		result := buildMockNodeMessage(req, 200, "", "", map[string]any{
+			"app":       svc.cfg.PackageName,
+			"status":    "NORMAL",
+			"error":     "",
+			"rawResult": string(raw),
+		})
+		writeJSON(w, http.StatusOK, result)
+	})
+
 	server := &http.Server{
 		Addr:         cfg.Listen,
 		Handler:      mux,
@@ -262,4 +355,49 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		panic(err)
 	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func buildMockNodeMessage(in mockTaskCreateRequest, code int, msg, raw string, output map[string]any) map[string]any {
+	outJSON, _ := json.Marshal(output)
+	return map[string]any{
+		"eventType": "EVENT_TYPE_EXEC_RESULT",
+		"messageId": fmt.Sprintf("mock-%d-%d", time.Now().UnixMilli(), rand.Intn(100000)),
+		"timestamp": time.Now().UnixMilli(),
+		"nodeId":    "",
+		"taskMeta":  rawOrNull(in.TaskMeta),
+		"msgStatus": "MESSAGE_STATUS_COMPLETE",
+		"eventData": map[string]any{
+			"execResult": map[string]any{
+				"in": map[string]any{
+					"timeoutSec":  in.TimeoutSec,
+					"deadline":    in.Deadline,
+					"type":        in.Type,
+					"payloadJson": in.PayloadJSON,
+				},
+				"errorCode":       code,
+				"errorMessage":    msg,
+				"errorRawMessage": raw,
+				"finishedAt":      time.Now().UTC().Format(time.RFC3339),
+				"outputJson":      string(outJSON),
+			},
+		},
+	}
+}
+
+func rawOrNull(v json.RawMessage) any {
+	if len(v) == 0 {
+		return nil
+	}
+	var out any
+	if err := json.Unmarshal(v, &out); err != nil {
+		return string(v)
+	}
+	return out
 }

@@ -8,9 +8,11 @@ This runbook verifies `Waydroid + CDP + tab open/list` in `detect-agent` without
 - Uses ADB + dynamic devtools socket detection.
 - Remaps one local port (default `9322`) when socket changes.
 - Exposes 3 local APIs:
+ - Exposes 4 local APIs:
   - `GET /healthz`
   - `GET /tabs/list`
   - `POST /tabs/open`
+  - `POST /mock/consume` (TaskCreateRequest-like input -> NodeMessage-like output)
 
 ## Prerequisites
 
@@ -74,6 +76,29 @@ curl -s -X POST http://127.0.0.1:18080/tabs/open \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 ```
+
+### 4) Mock Kafka consume/writeback schema locally (without Kafka)
+
+This endpoint accepts TaskCreateRequest-like JSON and returns NodeMessage-like JSON.
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/mock/consume \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "timeoutSec": 10,
+    "deadline": "",
+    "type": "INTERCEPT_DETECT",
+    "payloadJson": "{\"url\":\"https://example.com\"}",
+    "taskMeta": {"taskId":"demo-1","taskSeqId":"1"}
+  }'
+```
+
+Expected output shape:
+
+- `eventType=EVENT_TYPE_EXEC_RESULT`
+- `msgStatus=MESSAGE_STATUS_COMPLETE`
+- `eventData.execResult.in` echoes input
+- `eventData.execResult.outputJson` contains detect result JSON
 
 ## Notes
 
