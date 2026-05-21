@@ -1,0 +1,7 @@
+nacos:
+  addr: aws-hk-obs-nlb-internal-6dd9abde372b2969.elb.ap-east-1.amazonaws.com:8848
+  username: nacos
+  password: StrongPassword2025!
+  namespaceId: observable
+  groupId: boce
+  dataId: intercept-detect

@@ -1,0 +1,7 @@
+nacos:
+  addr: 172.31.43.85:8848,172.31.32.75:8848
+  username: nacos
+  password: nacos
+  namespaceId: observable-test
+  groupId: boce
+  dataId: intercept-detect

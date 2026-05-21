@@ -45,7 +45,6 @@ log
 logs
 openapi.yaml
 cmd/server/cache/
-config.yaml
 configs/local/config.yaml
 *cache/
 cmd/server/server
