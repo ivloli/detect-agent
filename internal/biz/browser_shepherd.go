@@ -27,17 +27,10 @@ func NewBrowserShepherd(logger log.Logger) *BrowserShepherd {
 	bs := &BrowserShepherd{
 		logger: log.NewHelper(log.With(logger, "module", "browser_shepherd/")),
 	}
+	// chrome和edge有点特殊，和其他浏览器一起并行初始化的时候，tab创建不出来
+	bs.HerdChrome = NewChromiumHerd(logger, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\browserprofile\\chrome", 9000, 9009)
+	bs.HerdEdge = NewChromiumHerd(logger, "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\browserprofile\\edge", 9010, 9019)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bs.HerdChrome = NewChromiumHerd(logger, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\browserprofile\\chrome", 9000, 9009)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bs.HerdEdge = NewChromiumHerd(logger, "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\browserprofile\\edge", 9010, 9019)
-	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -21,10 +21,11 @@ type NodeReporter struct {
 	producer        *franz_kafka.KafkaProducer
 }
 
-func NewNodeReporter(logger log.Logger, producer *franz_kafka.KafkaProducer) *NodeReporter {
+func NewNodeReporter(logger log.Logger, producer *franz_kafka.KafkaProducer, browserShepherd *BrowserShepherd) *NodeReporter {
 	return &NodeReporter{
-		logger:   log.NewHelper(logger),
-		producer: producer,
+		logger:          log.NewHelper(logger),
+		producer:        producer,
+		browserShepherd: browserShepherd,
 	}
 }
 
