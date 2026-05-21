@@ -241,6 +241,15 @@ func hasTabID(tabs []map[string]any, id string) bool {
 	return false
 }
 
+func tabWSURL(tabs []map[string]any, id string) string {
+	for _, t := range tabs {
+		if fmt.Sprintf("%v", t["id"]) == id {
+			return fmt.Sprintf("%v", t["webSocketDebuggerUrl"])
+		}
+	}
+	return ""
+}
+
 func (s *service) cdpGet(path string) ([]byte, int, error) {
 	if err := s.ensureForwardLocked(); err != nil {
 		return nil, 0, err
@@ -279,6 +288,21 @@ func (s *service) activateTab(tabID string) error {
 	return nil
 }
 
+func (s *service) navigateByTabID(tabID, targetURL string) error {
+	tabs, err := s.fetchTabsLocked()
+	if err != nil {
+		return err
+	}
+	if !hasTabID(tabs, tabID) {
+		return fmt.Errorf("tab id not found: %s", tabID)
+	}
+	if err := s.activateTab(tabID); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	return s.openURL(targetURL)
+}
+
 func (s *service) openURL(url string) error {
 	_, err := run("adb", "-s", s.cfg.Serial, "shell", "am", "start", "-n", s.cfg.PackageName+"/com.android.browser.BrowserActivity", "-a", "android.intent.action.VIEW", "-d", url)
 	if err == nil {
@@ -289,6 +313,16 @@ func (s *service) openURL(url string) error {
 	if err2 != nil {
 		return fmt.Errorf("open url failed: %v; fallback: %v", err, err2)
 	}
+	return nil
+}
+
+func (s *service) forceStopPackage() error {
+	_, err := run("adb", "-s", s.cfg.Serial, "shell", "am", "force-stop", s.cfg.PackageName)
+	if err != nil {
+		return err
+	}
+	// socket will likely change after force-stop; clear cached socket.
+	s.socket = ""
 	return nil
 }
 
@@ -391,16 +425,18 @@ func main() {
 			return
 		}
 		if svc.cfg.MaxTabs > 0 && countPageTabs(tabsBefore) >= svc.cfg.MaxTabs {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":    "max tabs reached",
-				"maxTabs":  svc.cfg.MaxTabs,
-				"pageTabs": countPageTabs(tabsBefore),
-				"serial":   svc.cfg.Serial,
-				"socket":   svc.socket,
-				"port":     svc.cfg.Port,
-				"tabs":     tabsBefore,
-			})
-			return
+			if strings.TrimSpace(req.TabID) == "" {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":    "max tabs reached",
+					"maxTabs":  svc.cfg.MaxTabs,
+					"pageTabs": countPageTabs(tabsBefore),
+					"serial":   svc.cfg.Serial,
+					"socket":   svc.socket,
+					"port":     svc.cfg.Port,
+					"tabs":     tabsBefore,
+				})
+				return
+			}
 		}
 
 		if strings.TrimSpace(req.TabID) != "" {
@@ -408,15 +444,15 @@ func main() {
 				writeJSON(w, http.StatusNotFound, map[string]any{"error": "tab id not found", "tabId": req.TabID})
 				return
 			}
-			if err := svc.activateTab(req.TabID); err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]any{"error": "activate tab failed", "detail": err.Error(), "tabId": req.TabID})
+			if err := svc.navigateByTabID(req.TabID, req.URL); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": "navigate by tab id failed", "detail": err.Error(), "tabId": req.TabID})
 				return
 			}
-		}
-
-		if err := svc.openURL(req.URL); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
-			return
+		} else {
+			if err := svc.openURL(req.URL); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+				return
+			}
 		}
 		time.Sleep(1500 * time.Millisecond)
 		tabs, err := svc.fetchTabsLocked()
@@ -425,6 +461,50 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, listResp{Serial: svc.cfg.Serial, Socket: svc.socket, Port: svc.cfg.Port, MaxTabs: svc.cfg.MaxTabs, PageTabs: countPageTabs(tabs), Tabs: tabs, Items: toTabItems(tabs)})
+	})
+
+	mux.HandleFunc("/tabs/reuse", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		var req openReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.URL) == "" || strings.TrimSpace(req.TabID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body, require url and tabId"})
+			return
+		}
+		svc.mu.Lock()
+		defer svc.mu.Unlock()
+		tabsBefore, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		if !hasTabID(tabsBefore, req.TabID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "tab id not found", "tabId": req.TabID})
+			return
+		}
+		if err := svc.navigateByTabID(req.TabID, req.URL); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "navigate by tab id failed", "detail": err.Error(), "tabId": req.TabID})
+			return
+		}
+		time.Sleep(1200 * time.Millisecond)
+		tabsAfter, err := svc.fetchTabsLocked()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"serial":   svc.cfg.Serial,
+			"socket":   svc.socket,
+			"port":     svc.cfg.Port,
+			"maxTabs":  svc.cfg.MaxTabs,
+			"pageTabs": countPageTabs(tabsAfter),
+			"tabId":    req.TabID,
+			"url":      req.URL,
+			"tabs":     tabsAfter,
+			"items":    toTabItems(tabsAfter),
+		})
 	})
 
 	mux.HandleFunc("/tabs/close", func(w http.ResponseWriter, r *http.Request) {
@@ -492,8 +572,46 @@ func main() {
 		time.Sleep(400 * time.Millisecond)
 		tabsAfter, err := svc.fetchTabsLocked()
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			// Optional fallback: force-stop browser to guarantee clear.
+			forceStop := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("forceStop")), "1") || strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("forceStop")), "true")
+			if forceStop {
+				_ = svc.forceStopPackage()
+				writeJSON(w, http.StatusOK, map[string]any{
+					"serial":   svc.cfg.Serial,
+					"socket":   svc.socket,
+					"port":     svc.cfg.Port,
+					"closed":   closed,
+					"failed":   failed,
+					"maxTabs":  svc.cfg.MaxTabs,
+					"pageTabs": 0,
+					"tabs":     []any{},
+					"items":    []any{},
+					"note":     "fallback force-stop applied",
+				})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "hint": "try /tabs/close-all?forceStop=true"})
 			return
+		}
+
+		if len(failed) > 0 {
+			forceStop := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("forceStop")), "1") || strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("forceStop")), "true")
+			if forceStop {
+				_ = svc.forceStopPackage()
+				writeJSON(w, http.StatusOK, map[string]any{
+					"serial":   svc.cfg.Serial,
+					"socket":   svc.socket,
+					"port":     svc.cfg.Port,
+					"closed":   closed,
+					"failed":   failed,
+					"maxTabs":  svc.cfg.MaxTabs,
+					"pageTabs": 0,
+					"tabs":     []any{},
+					"items":    []any{},
+					"note":     "partial close failed, fallback force-stop applied",
+				})
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"serial":   svc.cfg.Serial,
