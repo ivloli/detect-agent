@@ -323,6 +323,8 @@ func main() {
 			return
 		}
 
+		expanded := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("expanded")), "1") || strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("expanded")), "true")
+
 		// Minimal verdict: if list works, treat as NORMAL and return tabs in rawResult.
 		raw, _ := json.Marshal(map[string]any{
 			"url":     param.URL,
@@ -340,6 +342,25 @@ func main() {
 			"error":     "",
 			"rawResult": string(raw),
 		})
+
+		if expanded {
+			if eventData, ok := result["eventData"].(map[string]any); ok {
+				if execResult, ok := eventData["execResult"].(map[string]any); ok {
+					if outputJSON, ok := execResult["outputJson"].(string); ok {
+						var outputObj map[string]any
+						if err := json.Unmarshal([]byte(outputJSON), &outputObj); err == nil {
+							execResult["outputJsonExpanded"] = outputObj
+							if rawResultStr, ok := outputObj["rawResult"].(string); ok {
+								var rawObj map[string]any
+								if err := json.Unmarshal([]byte(rawResultStr), &rawObj); err == nil {
+									execResult["rawResultExpanded"] = rawObj
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		writeJSON(w, http.StatusOK, result)
 	})
 

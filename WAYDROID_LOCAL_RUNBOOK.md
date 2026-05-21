@@ -93,6 +93,25 @@ curl -s -X POST http://127.0.0.1:18080/mock/consume \
   }'
 ```
 
+If you want human-readable nested JSON fields, use `expanded=true`:
+
+```bash
+curl -s -X POST 'http://127.0.0.1:18080/mock/consume?expanded=true' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "timeoutSec": 10,
+    "deadline": "",
+    "type": "INTERCEPT_DETECT",
+    "payloadJson": "{\"url\":\"https://example.com\"}",
+    "taskMeta": {"taskId":"demo-1","taskSeqId":"1"}
+  }' | jq
+```
+
+In expanded mode response adds:
+
+- `eventData.execResult.outputJsonExpanded`
+- `eventData.execResult.rawResultExpanded`
+
 Expected output shape:
 
 - `eventType=EVENT_TYPE_EXEC_RESULT`
