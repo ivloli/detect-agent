@@ -19,12 +19,12 @@ func TestBuildResult(t *testing.T) {
 			TaskId: "task-001",
 			Tag:    "test-tag",
 		},
-		TimeoutSec: 30,
-		Type:       ctrlplanev1.BizCommandType(0), // use valid default
+		TimeoutSec:  30,
+		Type:        ctrlplanev1.BizCommandType(0), // use valid default
 		PayloadJson: `{"url":"https://example.com","app":"CHROME"}`,
 	}
 
-	result := buildResult(req, CodeSuccess, "", "", `{"status":"normal"}`)
+	result := buildResult(req, CodeSuccess, "", "", `{"status":"normal"}`, probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME)
 	if result == nil {
 		t.Fatal("buildResult returned nil")
 	}
@@ -62,12 +62,12 @@ func TestBuildResult_WithError(t *testing.T) {
 		TaskMeta: &ctrlplanev1.TaskMeta{
 			TaskId: "task-002",
 		},
-		TimeoutSec: 10,
-		Type:       ctrlplanev1.BizCommandType(0),
+		TimeoutSec:  10,
+		Type:        ctrlplanev1.BizCommandType(0),
 		PayloadJson: `{"url":"https://bad.com"}`,
 	}
 
-	result := buildResult(req, CodeError, "browser unavailable", "connection refused", `{}`)
+	result := buildResult(req, CodeError, "browser unavailable", "connection refused", `{}`, probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME)
 	if result == nil {
 		t.Fatal("buildResult returned nil")
 	}
@@ -199,8 +199,8 @@ func TestTaskCreateRequestSerde(t *testing.T) {
 			TaskId: "test-task",
 			Tag:    "test-tag",
 		},
-		TimeoutSec: 30,
-		Type:       ctrlplanev1.BizCommandType(0),
+		TimeoutSec:  30,
+		Type:        ctrlplanev1.BizCommandType(0),
 		PayloadJson: `{"url":"https://example.com","app":"CHROME"}`,
 	}
 
@@ -231,7 +231,7 @@ func TestInterceptAppTypeConstants(t *testing.T) {
 	_ = probecomm.InterceptAppType_INTERCEPT_APP_TYPE_360
 	_ = probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UC
 	_ = probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK
-	_ = probecomm.InterceptAppType_INTERCEPT_APP_TYPE_SOGOU
+	_ = probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ
 
 	t.Log("All InterceptAppType constants accessible")
 }
