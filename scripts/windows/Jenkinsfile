@@ -1,0 +1,362 @@
+// ============================================================
+// Jenkins Pipeline - DetectAgent Windows 部署流水线
+// 功能: 编译 Windows 二进制 → 上传 Nexus → 推送到 Windows 服务器
+// ============================================================
+
+def APP_NAME = "detect-agent"
+def NEXUS_URL = "http://nexus.gainetics.io/repository/raw/detect-agent"
+def NEXUS_CRED = "nexus-api-key"  // Jenkins 凭据ID
+def WINDOWS_SSH_CRED = "windows-agent-key"  // SSH 私钥凭据ID
+
+// Windows 服务器 IP 列表 (可从外部文件或 CMDB 读取)
+// 格式: [ip: string, region: string]
+def WINDOWS_HOSTS = [
+    [ip: "10.0.0.101", region: "ap-east-1"],  // Canary
+    [ip: "10.0.0.102", region: "ap-east-1"],
+    [ip: "10.0.0.103", region: "ap-east-1"],
+    // ...
+]
+
+// 分批大小（每批同时更新的机器数）
+def BATCH_SIZE = 5
+// 批次间隔（秒）
+def BATCH_INTERVAL = 120
+
+pipeline {
+    agent any
+    
+    tools {
+        go 'go-1.26'  // 根据 Jenkins 配置的 Go 工具名称调整
+    }
+    
+    environment {
+        VERSION = sh(script: 'git describe --tags --always --dirty 2>/dev/null || echo "dev"', returnStdout: true).trim()
+        BUILD_TIME = sh(script: "date -u '+%Y-%m-%d_%H:%M:%S'", returnStdout: true).trim()
+        BINARY_NAME = "${APP_NAME}-${VERSION}.exe"
+    }
+    
+    stages {
+        
+        stage('检出代码') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('编译 Windows 二进制') {
+            steps {
+                sh """
+                    mkdir -p build/windows
+                    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \\
+                    go build -ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -s -w" \\
+                    -o build/windows/${BINARY_NAME} ./cmd/server
+                """
+                sh "sha256sum build/windows/${BINARY_NAME} > build/windows/${BINARY_NAME}.sha256"
+                
+                script {
+                    def fileSize = sh(script: "du -h build/windows/${BINARY_NAME} | cut -f1", returnStdout: true).trim()
+                    echo "✅ Windows 构建完成: ${BINARY_NAME} (${fileSize})"
+                }
+            }
+        }
+        
+        stage('上传到 Nexus') {
+            when {
+                // 只在打 tag 时上传，避免开发期间的频繁上传
+                expression { return env.TAG_NAME != null }
+            }
+            steps {
+                withCredentials([string(credentialsId: NEXUS_CRED, variable: 'NEXUS_KEY')]) {
+                    sh """
+                        curl -u "admin:\${NEXUS_KEY}" \
+                            --upload-file build/windows/${BINARY_NAME} \
+                            ${NEXUS_URL}/${BINARY_NAME}
+                        curl -u "admin:\${NEXUS_KEY}" \
+                            --upload-file build/windows/${BINARY_NAME}.sha256 \
+                            ${NEXUS_URL}/${BINARY_NAME}.sha256
+                    """
+                }
+                echo "✅ 已上传到 Nexus: ${NEXUS_URL}/${BINARY_NAME}"
+            }
+        }
+        
+        stage('确认部署') {
+            input {
+                message "准备部署 v${VERSION} 到 Windows 服务器?"
+                ok "开始部署"
+                parameters {
+                    choice(
+                        name: 'DEPLOY_SCOPE',
+                        choices: ['canary', 'rolling', 'all'],
+                        description: '部署范围: canary(1台) / rolling(分批) / all(全部同时)'
+                    )
+                    string(
+                        name: 'CANARY_IP',
+                        defaultValue: WINDOWS_HOSTS[0].ip,
+                        description: 'Canary 目标 IP (canary模式时使用)'
+                    )
+                }
+            }
+        }
+        
+        stage('Canary 部署') {
+            when {
+                expression { DEPLOY_SCOPE == 'canary' }
+            }
+            steps {
+                script {
+                    echo "🔬 Canary 部署: ${CANARY_IP}"
+                    deployToWindows(hosts: [[ip: CANARY_IP]], version: VERSION)
+                    
+                    echo "⏳ 等待验证 (300秒)..."
+                    sleep 300
+                    
+                    // 验证服务状态
+                    def healthOk = checkWindowsService(ip: CANARY_IP)
+                    if (!healthOk) {
+                        error "Canary 部署验证失败，请检查 ${CANARY_IP}"
+                    }
+                }
+            }
+        }
+        
+        stage('等待 Canary 确认') {
+            when {
+                expression { DEPLOY_SCOPE == 'canary' }
+            }
+            steps {
+                input message: "Canary 部署完成 (${CANARY_IP})，验证通过请继续?", ok: "继续全量部署"
+            }
+        }
+        
+        stage('滚动部署') {
+            when {
+                expression { DEPLOY_SCOPE in ['rolling', 'all'] }
+            }
+            steps {
+                script {
+                    def targets = WINDOWS_HOSTS
+                    
+                    if (DEPLOY_SCOPE == 'rolling') {
+                        // 分批部署
+                        def batches = targets.collate(BATCH_SIZE)
+                        echo "🚀 开始滚动部署，共 ${targets.size()} 台，分 ${batches.size()} 批"
+                        
+                        batches.eachWithIndex { batch, index ->
+                            echo "--- 第 ${index + 1}/${batches.size()} 批: ${batch*.ip} ---"
+                            deployToWindows(hosts: batch, version: VERSION)
+                            
+                            if (index < batches.size() - 1) {
+                                echo "⏳ 等待 ${BATCH_INTERVAL} 秒后继续下一批..."
+                                sleep BATCH_INTERVAL
+                            }
+                        }
+                    } else {
+                        // 全部同时部署
+                        echo "🚀 全部 ${targets.size()} 台同时部署..."
+                        deployToWindows(hosts: targets, version: VERSION)
+                    }
+                }
+            }
+        }
+        
+        stage('部署验证') {
+            when {
+                expression { DEPLOY_SCOPE in ['rolling', 'all'] }
+            }
+            steps {
+                script {
+                    echo "🔍 验证所有服务器部署状态..."
+                    def failedHosts = []
+                    
+                    WINDOWS_HOSTS.each { host ->
+                        echo "检查 ${host.ip} ..."
+                        def ok = checkWindowsService(ip: host.ip)
+                        if (!ok) {
+                            failedHosts << host.ip
+                        }
+                    }
+                    
+                    if (failedHosts) {
+                        echo "⚠️ 以下服务器验证失败: ${failedHosts.join(', ')}"
+                        // 不阻塞 pipeline，只记录警告
+                    } else {
+                        echo "✅ 所有服务器部署验证通过!"
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "=========================================="
+            echo "✅ Windows 部署完成!"
+            echo "   版本: ${VERSION}"
+            echo "   目标: ${WINDOWS_HOSTS.size()} 台服务器"
+            echo "   部署方式: ${DEPLOY_SCOPE}"
+            echo "=========================================="
+            
+            // 可选: 发送企业微信/钉钉通知
+            // notifyWechat(status: 'success', version: VERSION)
+        }
+        
+        failure {
+            echo "=========================================="
+            echo "❌ Windows 部署失败!"
+            echo "   版本: ${VERSION}"
+            echo "   请检查日志"
+            echo "=========================================="
+        }
+        
+        cleanup {
+            cleanWs()
+        }
+    }
+}
+
+// ============================================================
+// 工具函数
+// ============================================================
+
+/**
+ * 部署到指定的 Windows 服务器列表
+ */
+def deployToWindows(Map params) {
+    def hosts = params.hosts
+    def version = params.version
+    
+    echo "📦 开始部署 v${version} 到 ${hosts.size()} 台服务器..."
+    
+    hosts.each { host ->
+        echo "  → ${host.ip} ..."
+        
+        def result = sshScript(
+            host: host.ip,
+            credentialsId: WINDOWS_SSH_CRED,
+            script: """
+                powershell -ExecutionPolicy Bypass -Command "
+                    try {
+                        # 1. 下载新版本从 Nexus
+                        Write-Host '下载 ${version}...'
+                        \$binaryUrl = '${NEXUS_URL}/${APP_NAME}-${version}.exe'
+                        \$shaUrl = '\${binaryUrl}.sha256'
+                        \$outFile = 'C:\\detect-agent\\bin\\${APP_NAME}.exe.new'
+                        
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        Invoke-WebRequest -Uri \$binaryUrl -OutFile \$outFile -TimeoutSec 300
+                        
+                        # 2. SHA256 校验
+                        \$expectedHash = (Invoke-WebRequest -Uri \$shaUrl -TimeoutSec 30).Content.Trim().Split()[0]
+                        \$actualHash = (Get-FileHash \$outFile -Algorithm SHA256).Hash.ToLower()
+                        if (\$expectedHash -ne \$actualHash) {
+                            throw \\\"SHA256 mismatch! Expected: \$expectedHash, Actual: \$actualHash\\\"
+                        }
+                        Write-Host 'SHA256 OK' -ForegroundColor Green
+                        
+                        # 3. 备份旧版本
+                        if (Test-Path 'C:\\detect-agent\\bin\\${APP_NAME}.exe') {
+                            Copy-Item 'C:\\detect-agent\\bin\\${APP_NAME}.exe' 'C:\\detect-agent\\backups\\${APP_NAME}-backup.exe' -Force
+                        }
+                        
+                        # 4. 停止服务
+                        Stop-Service -Name DetectAgent -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 2
+                        
+                        # 5. 替换
+                        Move-Item \$outFile 'C:\\detect-agent\\bin\\${APP_NAME}.exe' -Force
+                        
+                        # 6. 启动服务
+                        Start-Service -Name DetectAgent -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        
+                        # 7. 验证
+                        \$svc = Get-Service -Name DetectAgent -ErrorAction SilentlyContinue
+                        if (\$svc.Status -eq 'Running') {
+                            Write-Host 'OK' -ForegroundColor Green
+                            exit 0
+                        } else {
+                            Write-Host 'FAILED: Service status is \$(\$svc.Status)' -ForegroundColor Red
+                            # 尝试回滚
+                            if (Test-Path 'C:\\detect-agent\\backups\\${APP_NAME}-backup.exe') {
+                                Stop-Service DetectAgent -Force
+                                Copy-Item 'C:\\detect-agent\\backups\\${APP_NAME}-backup.exe' 'C:\\detect-agent\\bin\\${APP_NAME}.exe' -Force
+                                Start-Service DetectAgent
+                                Write-Host 'ROLLED BACK' -ForegroundColor Yellow
+                            }
+                            exit 1
+                        }
+                    } catch {
+                        Write-Host \\\"ERROR: \$(_)\\\" -ForegroundColor Red
+                        exit 1
+                    }
+                "
+            """,
+            failOnError: false
+        )
+        
+        if (result == 0) {
+            echo "  ✅ ${host.ip} 部署成功"
+        } else {
+            echo "  ❌ ${host.ip} 部署失败"
+        }
+    }
+}
+
+/**
+ * 检查 Windows 服务器上服务运行状态
+ */
+def checkWindowsService(Map params) {
+    def ip = params.ip
+    
+    def result = sshScript(
+        host: ip,
+        credentialsId: WINDOWS_SSH_CRED,
+        script: """
+            powershell -Command "
+                \$svc = Get-Service -Name DetectAgent -ErrorAction SilentlyContinue
+                if (\$svc -and \$svc.Status -eq 'Running') {
+                    \$version = 'unknown'
+                    if (Test-Path 'C:\\detect-agent\\version.json') {
+                        \$v = Get-Content 'C:\\detect-agent\\version.json' -Raw | ConvertFrom-Json
+                        \$version = \$v.version
+                    }
+                    Write-Host \\\"OK | Version: \$version | PID: \$(Get-Process detect-agent -ErrorAction SilentlyContinue | Select -ExpandProperty Id)\\\"
+                    exit 0
+                } else {
+                    Write-Host \\\"FAILED | Status: \$(\$svc.Status)\\\"
+                    exit 1
+                }
+            "
+        """,
+        failOnError: false
+    )
+    
+    return (result == 0)
+}
+
+/**
+ * SSH 执行脚本的辅助函数
+ */
+def sshScript(Map params) {
+    def host = params.host
+    def credentialsId = params.credentialsId
+    def script = params.script
+    def failOnError = params.failOnError != null ? params.failOnError : true
+    
+    def output = ""
+    try {
+        output = sshCommand(
+            remote: [host: host, credentialsId: credentialsId],
+            command: script
+        )
+        echo output
+        return 0
+    } catch (Exception e) {
+        echo "SSH Error (${host}): ${e.message}"
+        if (failOnError) {
+            error "部署失败: ${host}"
+        }
+        return 1
+    }
+}

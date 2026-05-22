@@ -1,0 +1,76 @@
+# ============================================
+# DetectAgent Windows 配置文件
+# 该文件用于每台 Windows 机器的最小配置
+# 所有业务配置通过 Nacos 动态下发
+# ============================================
+
+# Nacos 配置中心（必填）
+# 配置地址: observable / boce / intercept-detect
+nacos:
+  addr: "aws-hk-obs-nlb-internal-6dd9abde372b2969.elb.ap-east-1.amazonaws.com:8848"
+  username: "nacos"
+  password: "StrongPassword2025!"
+  namespaceId: "observable"
+  groupId: "boce"
+  dataId: "intercept-detect"
+
+# ============================================
+# 以下为 Windows 专用配置，可覆盖 Nacos 默认值
+# ============================================
+
+# 服务配置
+server:
+  name: "detect-agent-windows"
+  env: "prod"
+  http:
+    addr: "0.0.0.0:8000"
+  grpc:
+    addr: "0.0.0.0:9000"
+
+# Kafka 配置（一般由 Nacos 下发，此处留空）
+kafka:
+  # brokers:
+  #   - "kafka-1:9092"
+  #   - "kafka-2:9092"
+  # group: "detect-agent-group"
+  # topic: "detection-tasks"
+  enabled: true
+
+# 浏览器配置（Windows 路径）
+browser:
+  headless: true
+  max_instances: 3
+  timeout_seconds: 300
+
+  # Chrome 路径（Windows 默认安装路径）
+  chrome_path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  # Edge 路径
+  edge_path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+  # Firefox 路径
+  firefox_path: "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+
+  # 浏览器用户数据目录
+  user_data_dir: "C:\\detect-agent\\browser-data"
+  # 浏览器缓存目录
+  cache_dir: "C:\\detect-agent\\browser-cache"
+
+# 日志配置
+log:
+  level: "info"
+  filename: "detect-agent.log"
+  dir: "./logs"
+  max_size: 100    # MB
+  max_backups: 30
+  max_age: 7       # 天
+
+# 遥测配置（可选）
+tracing:
+  enabled: false
+  jaeger_endpoint: ""
+
+# 机器注册（可选）
+# 新机器启动时向此 API 注册本机信息
+# register_url: "http://cmdb.internal/agents/register"
+
+# 更新源（可选，用于 update.ps1 脚本）
+# nexus_url: "http://nexus.gainetics.io/repository/raw/detect-agent"

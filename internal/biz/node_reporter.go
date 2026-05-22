@@ -6,6 +6,10 @@ import (
 	"detect-agent/internal/pkg/franz-kafka"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -19,6 +23,8 @@ type NodeReporter struct {
 	logger          *log.Helper
 	browserShepherd *BrowserShepherd
 	producer        *franz_kafka.KafkaProducer
+	hostname        string
+	publicIPv4      string
 }
 
 func NewNodeReporter(logger log.Logger, producer *franz_kafka.KafkaProducer, browserShepherd *BrowserShepherd) *NodeReporter {
@@ -31,6 +37,7 @@ func NewNodeReporter(logger log.Logger, producer *franz_kafka.KafkaProducer, bro
 
 // Start 启动上报，先上报一次注册，再每隔30s上报一次心跳
 func (np *NodeReporter) Start(ctx context.Context) {
+	np.initNodeInfo()
 	heartTk := time.NewTicker(30 * time.Second)
 	defer heartTk.Stop()
 	msg := np.assembleReportMsg()
@@ -54,12 +61,45 @@ func (np *NodeReporter) assembleReportMsg() *ctrlplanev1.InterceptNodeInfo {
 	msg := &ctrlplanev1.InterceptNodeInfo{
 		ReportType:  ctrlplanev1.InterceptReportType_INTERCEPT_REPORT_TYPE_HEARTBEAT,
 		NodeType:    ctrlplanev1.InterceptNodeType_INTERCEPT_NODE_TYPE_BROWSER_FARM, // todo: 跟移动端共用一套代码的话，这里要从本地配置读
-		NodeName:    "",                                                             // todo
-		PublicIpv4:  "",                                                             // todo
+		NodeName:    np.hostname,
+		PublicIpv4:  np.publicIPv4,
 		Timestamp:   timestamppb.New(time.Now()),
 		NodeDetails: np.browserShepherd.GetBrowserDetails(),
 	}
 	return msg
+}
+
+// initNodeInfo 初始化本机 hostname 和公网 IP（启动时执行一次）
+func (np *NodeReporter) initNodeInfo() {
+	hostname, err := os.Hostname()
+	if err != nil {
+		np.logger.Errorf("get hostname error: %v", err)
+		hostname = "unknown"
+	}
+
+	publicIP, err := np.getPublicIP()
+	if err != nil {
+		np.logger.Errorf("get public ip error: %v", err)
+		publicIP = ""
+	}
+	np.hostname = fmt.Sprintf("%s-%s", hostname, publicIP)
+	np.publicIPv4 = publicIP
+}
+
+// getPublicIP 通过 HTTP GET 请求 ifconfig.me 获取本机公网 IP
+func (np *NodeReporter) getPublicIP() (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://ifconfig.me")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
 }
 
 func (np *NodeReporter) sendMsg(ctx context.Context, msg *ctrlplanev1.InterceptNodeInfo) error {
