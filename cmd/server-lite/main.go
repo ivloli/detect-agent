@@ -31,6 +31,7 @@ type Config struct {
 	Listen string
 
 	NacosAddr      string
+	NacosScheme    string
 	NacosUser      string
 	NacosPass      string
 	NacosNamespace string
@@ -401,23 +402,21 @@ func loadKafkaFromNacos(cfg *Config) {
 	if strings.TrimSpace(cfg.KafkaBrokers) != "" || strings.TrimSpace(cfg.NacosAddr) == "" {
 		return
 	}
-
-	host, port := parseAddr(cfg.NacosAddr)
-	if host == "" || port <= 0 {
-		log.Printf("[server-lite] skip nacos load: invalid nacos addr=%s", cfg.NacosAddr)
+	sc, err := buildServerConfigs(cfg.NacosAddr, cfg.NacosScheme)
+	if err != nil || len(sc) == 0 {
+		log.Printf("[server-lite] skip nacos load: %v", err)
 		return
 	}
-
-	sc := []constant.ServerConfig{{IpAddr: host, Port: uint64(port)}}
-	cc := constant.ClientConfig{
-		NamespaceId:         cfg.NacosNamespace,
-		Username:            cfg.NacosUser,
-		Password:            cfg.NacosPass,
-		TimeoutMs:           5000,
-		NotLoadCacheAtStart: true,
-		LogDir:              "/tmp/nacos/log",
-		CacheDir:            "/tmp/nacos/cache",
-	}
+	cc := *constant.NewClientConfig(
+		constant.WithNamespaceId(cfg.NacosNamespace),
+		constant.WithTimeoutMs(5000),
+		constant.WithNotLoadCacheAtStart(true),
+		constant.WithLogDir("/tmp/nacos/log"),
+		constant.WithCacheDir("/tmp/nacos/cache"),
+		constant.WithLogLevel("warn"),
+		constant.WithUsername(cfg.NacosUser),
+		constant.WithPassword(cfg.NacosPass),
+	)
 	client, err := clients.NewConfigClient(vo.NacosClientParam{ClientConfig: &cc, ServerConfigs: sc})
 	if err != nil {
 		log.Printf("[server-lite] nacos client init failed: %v", err)
@@ -431,6 +430,7 @@ func loadKafkaFromNacos(cfg *Config) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(content), &m); err != nil {
 		log.Printf("[server-lite] nacos config decode failed: %v", err)
+		log.Printf("[server-lite] nacos raw content (first 512): %s", clip(content, 512))
 		return
 	}
 	kv, _ := m["kafka"].(map[string]any)
@@ -454,6 +454,36 @@ func loadKafkaFromNacos(cfg *Config) {
 		cfg.KafkaOutTopic = fmt.Sprintf("%v", kv["intercept_detect_result_topic"])
 	}
 	log.Printf("[server-lite] kafka loaded from nacos brokers=%s in=%s out=%s group=%s", cfg.KafkaBrokers, cfg.KafkaInTopic, cfg.KafkaOutTopic, cfg.KafkaGroup)
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func buildServerConfigs(rawAddr, scheme string) ([]constant.ServerConfig, error) {
+	if strings.TrimSpace(rawAddr) == "" {
+		return nil, fmt.Errorf("empty nacos addr")
+	}
+	if strings.TrimSpace(scheme) == "" {
+		scheme = "http"
+	}
+	parts := strings.Split(rawAddr, ",")
+	out := make([]constant.ServerConfig, 0, len(parts))
+	for _, p := range parts {
+		h, pt := parseAddr(strings.TrimSpace(p))
+		if h == "" || pt <= 0 {
+			continue
+		}
+		sc := constant.NewServerConfig(h, uint64(pt), constant.WithScheme(scheme))
+		out = append(out, *sc)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("invalid nacos addr list: %s", rawAddr)
+	}
+	return out, nil
 }
 
 func parseAddr(addr string) (string, int) {
@@ -509,6 +539,7 @@ func main() {
 	cfg := &Config{}
 	flag.StringVar(&cfg.Listen, "listen", ":19080", "http listen")
 	flag.StringVar(&cfg.NacosAddr, "nacos-addr", envOr("NACOS_ADDR", ""), "nacos host:port[,host:port]")
+	flag.StringVar(&cfg.NacosScheme, "nacos-scheme", envOr("NACOS_SCHEME", "http"), "nacos scheme: http|https")
 	flag.StringVar(&cfg.NacosUser, "nacos-user", envOr("NACOS_USER", "nacos"), "nacos username")
 	flag.StringVar(&cfg.NacosPass, "nacos-pass", envOr("NACOS_PASS", "nacos"), "nacos password")
 	flag.StringVar(&cfg.NacosNamespace, "nacos-namespace", envOr("NACOS_NAMESPACE", "observable-dev"), "nacos namespace")
