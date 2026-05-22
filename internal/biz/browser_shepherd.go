@@ -3,7 +3,6 @@ package biz
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -27,47 +26,10 @@ func NewBrowserShepherd(logger log.Logger) *BrowserShepherd {
 	bs := &BrowserShepherd{
 		logger: log.NewHelper(log.With(logger, "module", "browser_shepherd/")),
 	}
-	if stringsEqualFoldAny(os.Getenv("DETECT_AGENT_WAYDROID_ENABLED"), "1", "true") {
-		bs.logger.Info("waydroid mode enabled, skip desktop chromium herd bootstrap")
-		return bs
-	}
-	// 并行初始化时 tab 创建存在不稳定，保持串行初始化。
-	bs.HerdChrome = NewChromiumHerd(logger, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\browserprofile\\chrome", 9000, 9009)
-	bs.HerdEdge = NewChromiumHerd(logger, "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\browserprofile\\edge", 9010, 9019)
-	bs.Herd360 = NewChromiumHerd(logger, "C:\\Users\\Administrator\\AppData\\Local\\360ChromeX\\Chrome\\Application\\360ChromeX.exe", "C:\\browserprofile\\360", 9020, 9029)
-	bs.HerdUC = NewChromiumHerd(logger, "C:\\Program Files\\UCBrowser\\uc.exe", "C:\\browserprofile\\uc", 9030, 9039)
-	bs.HerdQuark = NewChromiumHerd(logger, "C:\\Program Files\\Quark\\quark.exe", "C:\\browserprofile\\quark", 9040, 9049)
-	bs.HerdQQ = NewChromiumHerd(logger, "C:\\Program Files\\Tencent\\QQBrowser\\QQBrowser.exe", "C:\\browserprofile\\qq", 9050, 9059)
+	// ARM Android-only mode: no desktop Chromium herd initialization.
+	// Detection runtime is provided by WaydroidAdapter.
+	bs.logger.Info("android-only mode enabled: desktop browser herds are disabled")
 	return bs
-}
-
-func stringsEqualFoldAny(v string, expects ...string) bool {
-	for _, e := range expects {
-		if len(v) > 0 && len(e) > 0 && (v == e || (len(v) == len(e) && equalFoldASCII(v, e))) {
-			return true
-		}
-	}
-	return false
-}
-
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca := a[i]
-		cb := b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }
 
 // StartMonitor 定时检查所有浏览器健康状况，自动恢复不健康的实例

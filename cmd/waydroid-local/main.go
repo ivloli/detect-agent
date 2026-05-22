@@ -145,6 +145,20 @@ func (s *service) detectSocket(serial string) string {
 	return sockets[0]
 }
 
+func (s *service) waitDetectSocket(serial string, maxWait time.Duration) string {
+	deadline := time.Now().Add(maxWait)
+	for {
+		sock := s.detectSocket(serial)
+		if sock != "" {
+			return sock
+		}
+		if time.Now().After(deadline) {
+			return ""
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 func (s *service) ensureForwardLocked() error {
 	if s.cfg.Serial == "" {
 		s.cfg.Serial = firstDevice()
@@ -154,7 +168,11 @@ func (s *service) ensureForwardLocked() error {
 	}
 	newSock := s.detectSocket(s.cfg.Serial)
 	if newSock == "" {
-		return errors.New("no devtools socket found")
+		// Browser may be restarting after force-stop. Wait for socket.
+		newSock = s.waitDetectSocket(s.cfg.Serial, 8*time.Second)
+		if newSock == "" {
+			return errors.New("no devtools socket found")
+		}
 	}
 	if s.socket == newSock {
 		return nil
@@ -582,15 +600,15 @@ func main() {
 		}
 		svc.syncBusyMap(tabs)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"serial":    svc.cfg.Serial,
-			"socket":    svc.socket,
-			"port":      svc.cfg.Port,
-			"maxTabs":   svc.cfg.MaxTabs,
-			"pageTabs":  countPageTabs(tabs),
-			"strategy":  strategy,
-			"tabId":     selectedTabID,
-			"tabs":      tabs,
-			"items":     toTabItems(tabs),
+			"serial":   svc.cfg.Serial,
+			"socket":   svc.socket,
+			"port":     svc.cfg.Port,
+			"maxTabs":  svc.cfg.MaxTabs,
+			"pageTabs": countPageTabs(tabs),
+			"strategy": strategy,
+			"tabId":    selectedTabID,
+			"tabs":     tabs,
+			"items":    toTabItems(tabs),
 		})
 	})
 
