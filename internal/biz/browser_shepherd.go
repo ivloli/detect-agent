@@ -45,13 +45,12 @@ func (s *BrowserShepherd) StartMonitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 串行执行，避免多个HerdHealthCheck goroutine并发写同一个herd导致竞态
-			s.HerdHealthCheck(s.HerdChrome)
-			s.HerdHealthCheck(s.HerdEdge)
-			s.HerdHealthCheck(s.Herd360)
-			s.HerdHealthCheck(s.HerdUC)
-			s.HerdHealthCheck(s.HerdQuark)
-			s.HerdHealthCheck(s.HerdQQ)
+			go s.HerdHealthCheck(s.HerdChrome)
+			go s.HerdHealthCheck(s.HerdEdge)
+			go s.HerdHealthCheck(s.Herd360)
+			go s.HerdHealthCheck(s.HerdUC)
+			go s.HerdHealthCheck(s.HerdQuark)
+			go s.HerdHealthCheck(s.HerdQQ)
 		}
 	}
 }
