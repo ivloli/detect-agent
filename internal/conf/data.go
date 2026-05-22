@@ -98,6 +98,8 @@ type ConfigData struct {
 type KafkaConfig struct {
 	// Brokers Kafka集群的broker地址列表
 	Brokers []string `json:"brokers" yaml:"brokers"`
+	// 拨测broker，结果往这个发
+	BoceBrokers []string `json:"boce_brokers" yaml:"boce_brokers"`
 	// Group 消费者组名称
 	Group string `json:"group" yaml:"group"`
 	// SASL认证配置

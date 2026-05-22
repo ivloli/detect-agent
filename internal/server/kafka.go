@@ -37,14 +37,24 @@ func NewKafkaServer(
 	}
 }
 
-// NewKafkaProducerConfig 创建Kafka生产者配置
+// NewKafkaProducerConfig 创建Kafka生产者配置（使用默认Brokers）
 func NewKafkaProducerConfig() *franzkafka.ProducerConfig {
+	return newProducerConfig(conf.GetData().Kafka.Brokers)
+}
+
+// NewBoceKafkaProducerConfig 创建拨测Kafka生产者配置（使用BoceBrokers）
+func NewBoceKafkaProducerConfig() *franzkafka.ProducerConfig {
+	return newProducerConfig(conf.GetData().Kafka.BoceBrokers)
+}
+
+// newProducerConfig 根据指定的brokers创建Kafka生产者配置
+func newProducerConfig(brokers []string) *franzkafka.ProducerConfig {
 	kafkaConf := conf.GetData().Kafka
 	if kafkaConf == nil {
 		return nil
 	}
 	config := &franzkafka.ProducerConfig{
-		Brokers: kafkaConf.Brokers,
+		Brokers: brokers,
 	}
 	if kafkaConf.Sasl != nil && kafkaConf.Sasl.Enable {
 		config.Sasl = &franzkafka.SaslConfig{

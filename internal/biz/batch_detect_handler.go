@@ -32,14 +32,38 @@ type BatchDetectHandler struct {
 // NewBatchDetectHandler 创建批量探测处理器
 func NewBatchDetectHandler(
 	logger log.Logger,
-	producer *franz_kafka.KafkaProducer,
 	browserShepherd *BrowserShepherd,
 ) *BatchDetectHandler {
+	// 使用BoceBrokers创建内部producer
+	producer := newBoceProducer(logger)
 	return &BatchDetectHandler{
 		logger:          log.NewHelper(log.With(logger, "module", "biz/batch_detect_handler")),
 		producer:        producer,
 		browserShepherd: browserShepherd,
 	}
+}
+
+// newBoceProducer 从配置创建使用BoceBrokers的Kafka producer
+func newBoceProducer(logger log.Logger) *franz_kafka.KafkaProducer {
+	kafkaConf := conf.GetData().Kafka
+	if kafkaConf == nil || len(kafkaConf.BoceBrokers) == 0 {
+		return nil
+	}
+	config := &franz_kafka.ProducerConfig{
+		Brokers: kafkaConf.BoceBrokers,
+	}
+	if kafkaConf.Sasl != nil && kafkaConf.Sasl.Enable {
+		config.Sasl = &franz_kafka.SaslConfig{
+			Enable:   true,
+			Username: kafkaConf.Sasl.Username,
+			Password: kafkaConf.Sasl.Password,
+		}
+	}
+	producer, err := franz_kafka.NewKafkaProducer(config, logger)
+	if err != nil {
+		return nil
+	}
+	return producer
 }
 
 // ==================== Chrome 批量处理器 ====================
@@ -103,7 +127,7 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 	blocked, detail, err := browser.ChromiumDetect(newCtx, tab, param.Url)
 	output.RawResult = detail
 	if err != nil {
-		h.handler.logger.Errorf("Handle detect browser failed: %v", err)
+		h.handler.logger.Errorf("Handle detect browser failed: %v, url: %s", err, param.Url)
 		output.Error = err.Error()
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
 		h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic)
@@ -120,6 +144,10 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 
 func (h *ChromiumBatchHandler) sendResult(ctx context.Context, in *ctrlplanev1.TaskCreateRequest,
 	out *localapiv1.InterceptDetectResult, code int32, msg, raw, topic string) {
+	if h.handler.producer == nil {
+		h.handler.logger.Error("sendResult producer is nil, skip sending")
+		return
+	}
 	outJSONBytes, err := json.Marshal(out)
 	if err != nil {
 		h.handler.logger.Errorf("sendResult marshal out json failed: %v", err)
