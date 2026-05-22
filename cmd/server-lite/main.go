@@ -38,6 +38,9 @@ type Config struct {
 	NacosDataID    string
 
 	KafkaBrokers  string
+	KafkaInBrokers string
+	KafkaOutBrokers string
+	KafkaHeartbeatBrokers string
 	KafkaGroup    string
 	KafkaInTopic  string
 	KafkaOutTopic string
@@ -544,6 +547,26 @@ func rawOrNil(v json.RawMessage) any {
 	return out
 }
 
+func newKafkaClient(brokers []string, user, pass string, consumeTopic string, group string) (*kgo.Client, error) {
+	if len(brokers) == 0 {
+		return nil, fmt.Errorf("empty brokers")
+	}
+	opts := []kgo.Opt{
+		kgo.SeedBrokers(brokers...),
+		kgo.AllowAutoTopicCreation(),
+	}
+	if strings.TrimSpace(consumeTopic) != "" {
+		opts = append(opts,
+			kgo.ConsumerGroup(group),
+			kgo.ConsumeTopics(consumeTopic),
+		)
+	}
+	if user != "" {
+		opts = append(opts, kgo.SASL(plain.Auth{User: user, Pass: pass}.AsMechanism()))
+	}
+	return kgo.NewClient(opts...)
+}
+
 func main() {
 	cfg := &Config{}
 	flag.StringVar(&cfg.Listen, "listen", ":19080", "http listen")
@@ -556,6 +579,9 @@ func main() {
 	flag.StringVar(&cfg.NacosDataID, "nacos-dataid", envOr("NACOS_DATA_ID", "intercept-detect"), "nacos dataId")
 
 	flag.StringVar(&cfg.KafkaBrokers, "kafka-brokers", envOr("KAFKA_BROKERS", ""), "comma-separated brokers")
+	flag.StringVar(&cfg.KafkaInBrokers, "kafka-in-brokers", envOr("KAFKA_IN_BROKERS", ""), "comma-separated brokers for input topic")
+	flag.StringVar(&cfg.KafkaOutBrokers, "kafka-out-brokers", envOr("KAFKA_OUT_BROKERS", ""), "comma-separated brokers for output topic")
+	flag.StringVar(&cfg.KafkaHeartbeatBrokers, "kafka-heartbeat-brokers", envOr("KAFKA_HEARTBEAT_BROKERS", ""), "comma-separated brokers for heartbeat topic")
 	flag.StringVar(&cfg.KafkaGroup, "kafka-group", envOr("KAFKA_GROUP", "detect-agent-lite"), "kafka group")
 	flag.StringVar(&cfg.KafkaInTopic, "kafka-in-topic", envOr("KAFKA_IN_TOPIC", "intercept_detect_mi"), "kafka input topic")
 	flag.StringVar(&cfg.KafkaOutTopic, "kafka-out-topic", envOr("KAFKA_OUT_TOPIC", "task-results"), "kafka output topic")
@@ -571,31 +597,47 @@ func main() {
 	flag.Parse()
 
 	loadKafkaFromNacos(cfg)
-	brokers := parseBrokers(cfg.KafkaBrokers)
-	if len(brokers) == 0 || cfg.KafkaInTopic == "" || cfg.KafkaOutTopic == "" {
-		log.Fatalf("kafka config missing: brokers=%v in=%q out=%q", brokers, cfg.KafkaInTopic, cfg.KafkaOutTopic)
+	defaultBrokers := parseBrokers(cfg.KafkaBrokers)
+	inBrokers := parseBrokers(cfg.KafkaInBrokers)
+	outBrokers := parseBrokers(cfg.KafkaOutBrokers)
+	hbBrokers := parseBrokers(cfg.KafkaHeartbeatBrokers)
+	if len(inBrokers) == 0 {
+		inBrokers = defaultBrokers
+	}
+	if len(outBrokers) == 0 {
+		outBrokers = defaultBrokers
+	}
+	if len(hbBrokers) == 0 {
+		hbBrokers = inBrokers
+	}
+
+	if len(inBrokers) == 0 || cfg.KafkaInTopic == "" || cfg.KafkaOutTopic == "" {
+		log.Fatalf("kafka config missing: inBrokers=%v inTopic=%q outTopic=%q", inBrokers, cfg.KafkaInTopic, cfg.KafkaOutTopic)
 	}
 
 	rt := &Runtime{cfg: cfg, busy: map[string]bool{}}
 
-	clientOpts := []kgo.Opt{
-		kgo.SeedBrokers(brokers...),
-		kgo.ConsumerGroup(cfg.KafkaGroup),
-		kgo.ConsumeTopics(cfg.KafkaInTopic),
-		kgo.AllowAutoTopicCreation(),
-	}
-	if cfg.KafkaUser != "" {
-		clientOpts = append(clientOpts, kgo.SASL(plain.Auth{User: cfg.KafkaUser, Pass: cfg.KafkaPass}.AsMechanism()))
-	}
-	cl, err := kgo.NewClient(clientOpts...)
+	inClient, err := newKafkaClient(inBrokers, cfg.KafkaUser, cfg.KafkaPass, cfg.KafkaInTopic, cfg.KafkaGroup)
 	if err != nil {
-		log.Fatalf("new kafka client failed: %v", err)
+		log.Fatalf("new kafka input client failed: %v", err)
 	}
-	defer cl.Close()
+	defer inClient.Close()
+
+	outClient, err := newKafkaClient(outBrokers, cfg.KafkaUser, cfg.KafkaPass, "", "")
+	if err != nil {
+		log.Fatalf("new kafka output client failed: %v", err)
+	}
+	defer outClient.Close()
+
+	hbClient, err := newKafkaClient(hbBrokers, cfg.KafkaUser, cfg.KafkaPass, "", "")
+	if err != nil {
+		log.Fatalf("new kafka heartbeat client failed: %v", err)
+	}
+	defer hbClient.Close()
 
 	go func() {
 		for {
-			fetches := cl.PollFetches(context.Background())
+			fetches := inClient.PollFetches(context.Background())
 			if errs := fetches.Errors(); len(errs) > 0 {
 				for _, e := range errs {
 					log.Printf("kafka poll error: %v", e)
@@ -611,7 +653,7 @@ func main() {
 				var p InterceptParam
 				if err := json.Unmarshal([]byte(in.PayloadJSON), &p); err != nil || strings.TrimSpace(p.URL) == "" {
 					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: cfg.Package, Status: "FAIL", Error: "invalid payloadJson", RawResult: ""})
-					publishResult(cl, cfg.KafkaOutTopic, out)
+					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutS)*time.Second)
@@ -620,7 +662,7 @@ func main() {
 				cancel()
 				if err != nil {
 					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: cfg.Package, Status: "FAIL", Error: err.Error(), RawResult: detail})
-					publishResult(cl, cfg.KafkaOutTopic, out)
+					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
 				status := "NORMAL"
@@ -628,12 +670,12 @@ func main() {
 					status = "BLOCKED"
 				}
 				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: cfg.Package, Status: status, Error: "", RawResult: detail})
-				publishResult(cl, cfg.KafkaOutTopic, out)
+				publishResult(outClient, cfg.KafkaOutTopic, out)
 			})
 		}
 	}()
 
-	if strings.TrimSpace(cfg.KafkaHeartbeatTopic) != "" {
+	if strings.TrimSpace(cfg.KafkaHeartbeatTopic) != "" && len(hbBrokers) > 0 {
 		go func() {
 			tk := time.NewTicker(30 * time.Second)
 			defer tk.Stop()
@@ -653,7 +695,7 @@ func main() {
 				}
 				b, _ := json.Marshal(hb)
 				rec := &kgo.Record{Topic: cfg.KafkaHeartbeatTopic, Key: []byte(fmt.Sprint(time.Now().UnixNano())), Value: b}
-				cl.Produce(context.Background(), rec, func(r *kgo.Record, err error) {
+				hbClient.Produce(context.Background(), rec, func(r *kgo.Record, err error) {
 					if err != nil {
 						log.Printf("heartbeat produce failed: %v", err)
 					}
@@ -684,12 +726,16 @@ func main() {
 			"inTopic":  cfg.KafkaInTopic,
 			"outTopic": cfg.KafkaOutTopic,
 			"heartbeatTopic": cfg.KafkaHeartbeatTopic,
+			"inBrokers": inBrokers,
+			"outBrokers": outBrokers,
+			"heartbeatBrokers": hbBrokers,
 		})
 	})
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second}
 	log.Printf("server-lite up listen=%s package=%s serial=%s port=%d maxTabs=%d", cfg.Listen, cfg.Package, cfg.Serial, cfg.Port, cfg.MaxTabs)
-	log.Printf("kafka in=%s out=%s brokers=%s", cfg.KafkaInTopic, cfg.KafkaOutTopic, cfg.KafkaBrokers)
+	log.Printf("kafka in=%s out=%s hb=%s", cfg.KafkaInTopic, cfg.KafkaOutTopic, cfg.KafkaHeartbeatTopic)
+	log.Printf("kafka brokers in=%v out=%v hb=%v", inBrokers, outBrokers, hbBrokers)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

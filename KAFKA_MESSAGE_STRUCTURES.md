@@ -143,6 +143,11 @@ From current runtime config sample:
 - Output (heartbeat):
   - `intercept_detect_data_report`
 
+Current broker split used by your team:
+
+- Task input + heartbeat: `13.251.208.168:9092`
+- Result output: `10.0.24.217:9092`
+
 ---
 
 ## 5) Quick kcat examples
