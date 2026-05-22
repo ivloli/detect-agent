@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"os"
 	"time"
 
@@ -92,6 +93,9 @@ func (b *Browser) CloseTabPool() {
 func (b *Browser) ChromiumDetect(ctx context.Context, tab *PooledTab, urlStr string) (bool, string, error) {
 	tab.Detector.Reset()
 
+	// 规范化 URL：如果缺少协议前缀则自动补上 https://
+	normalizedURL := normalizeURL(urlStr)
+
 	// 使用 tab.Ctx (chromedp 上下文) 作为 chromedp 操作的基础上下文,
 	// 并从传入的 ctx 中继承超时/截止时间, 以确保 chromedp 能正确提取 target 信息
 	detectCtx := tab.Ctx
@@ -103,7 +107,7 @@ func (b *Browser) ChromiumDetect(ctx context.Context, tab *PooledTab, urlStr str
 
 	runErr := chromedp.Run(detectCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, _, _, _, err := page.Navigate(urlStr).Do(ctx)
+			_, _, _, _, err := page.Navigate(normalizedURL).Do(ctx)
 			return err
 		}),
 	)
@@ -132,4 +136,16 @@ func (b *Browser) ChromiumDetect(ctx context.Context, tab *PooledTab, urlStr str
 		}
 	}
 	return blocked, detail, runErr
+}
+
+// normalizeURL 规范化 URL：如果缺少协议前缀则自动补上 https://
+func normalizeURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" {
+		return "https://" + rawURL
+	}
+	return rawURL
 }
