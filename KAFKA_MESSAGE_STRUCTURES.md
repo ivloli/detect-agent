@@ -178,3 +178,59 @@ kcat -b "<BROKERS>" -t "intercept_detect_data_report" -C -o -20
 - `examples/task_create_request.sample.json`
 - `examples/node_message_result.sample.json`
 - `examples/heartbeat_report.sample.json`
+
+---
+
+## 7) ERR_BLOCKED verification script (Waydroid/CDP)
+
+File:
+
+- `examples/verify_err_blocked.js`
+
+Purpose:
+
+- Force `Network.loadingFailed` with `ERR_BLOCKED_BY_CLIENT` via CDP Fetch interception.
+- Validate blocked-signal handling before wiring BLOCKED verdict into runtime/Kafka flow.
+
+### Prerequisites
+
+```bash
+npm i ws
+```
+
+### Get target websocket URL
+
+```bash
+curl -s http://127.0.0.1:9222/json/list
+```
+
+Pick one `webSocketDebuggerUrl`, e.g.:
+
+```text
+ws://127.0.0.1:9222/devtools/page/<target-id>
+```
+
+### Run script
+
+Option A (env):
+
+```bash
+WS_URL='ws://127.0.0.1:9222/devtools/page/<target-id>' \
+node examples/verify_err_blocked.js
+```
+
+Option B (args):
+
+```bash
+node examples/verify_err_blocked.js \
+  'ws://127.0.0.1:9222/devtools/page/<target-id>' \
+  'https://example.com' \
+  12000
+```
+
+### Success criteria
+
+Expected output contains:
+
+- `loadingFailed: net::ERR_BLOCKED_BY_CLIENT ...`
+- `HIT_ERR_BLOCKED`
