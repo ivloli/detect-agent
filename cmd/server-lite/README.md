@@ -13,7 +13,7 @@ GOWORK=off go build
 ## Run (env-first)
 
 ```bash
-export KAFKA_BROKERS="<broker1:9092>,<broker2:9092>"
+export KAFKA_BROKERS="13.251.208.168:9092"
 export KAFKA_GROUP="detect-agent-lite"
 export KAFKA_IN_TOPIC="<intercept_detect_chrome_topic>"
 export KAFKA_OUT_TOPIC="<intercept_detect_result_topic>"

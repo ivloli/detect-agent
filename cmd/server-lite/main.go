@@ -41,6 +41,7 @@ type Config struct {
 	KafkaGroup    string
 	KafkaInTopic  string
 	KafkaOutTopic string
+	KafkaHeartbeatTopic string
 	KafkaUser     string
 	KafkaPass     string
 
@@ -87,6 +88,15 @@ type NodeMessage struct {
 	TaskMeta  any            `json:"taskMeta"`
 	MsgStatus string         `json:"msgStatus"`
 	EventData map[string]any `json:"eventData"`
+}
+
+type HeartbeatMessage struct {
+	ReportType string `json:"reportType"`
+	NodeType   string `json:"nodeType"`
+	NodeName   string `json:"nodeName"`
+	PublicIPv4 string `json:"publicIpv4"`
+	Timestamp  string `json:"timestamp"`
+	NodeDetails []map[string]any `json:"nodeDetails"`
 }
 
 type Runtime struct {
@@ -547,8 +557,9 @@ func main() {
 
 	flag.StringVar(&cfg.KafkaBrokers, "kafka-brokers", envOr("KAFKA_BROKERS", ""), "comma-separated brokers")
 	flag.StringVar(&cfg.KafkaGroup, "kafka-group", envOr("KAFKA_GROUP", "detect-agent-lite"), "kafka group")
-	flag.StringVar(&cfg.KafkaInTopic, "kafka-in-topic", envOr("KAFKA_IN_TOPIC", ""), "kafka input topic")
-	flag.StringVar(&cfg.KafkaOutTopic, "kafka-out-topic", envOr("KAFKA_OUT_TOPIC", ""), "kafka output topic")
+	flag.StringVar(&cfg.KafkaInTopic, "kafka-in-topic", envOr("KAFKA_IN_TOPIC", "intercept_detect_mi"), "kafka input topic")
+	flag.StringVar(&cfg.KafkaOutTopic, "kafka-out-topic", envOr("KAFKA_OUT_TOPIC", "task-results"), "kafka output topic")
+	flag.StringVar(&cfg.KafkaHeartbeatTopic, "kafka-heartbeat-topic", envOr("KAFKA_HEARTBEAT_TOPIC", "intercept_detect_data_report"), "kafka heartbeat topic")
 	flag.StringVar(&cfg.KafkaUser, "kafka-user", envOr("KAFKA_USER", ""), "kafka sasl username")
 	flag.StringVar(&cfg.KafkaPass, "kafka-pass", envOr("KAFKA_PASS", ""), "kafka sasl password")
 
@@ -622,6 +633,36 @@ func main() {
 		}
 	}()
 
+	if strings.TrimSpace(cfg.KafkaHeartbeatTopic) != "" {
+		go func() {
+			tk := time.NewTicker(30 * time.Second)
+			defer tk.Stop()
+			for {
+				hb := HeartbeatMessage{
+					ReportType: "INTERCEPT_REPORT_TYPE_HEARTBEAT",
+					NodeType:   "INTERCEPT_NODE_TYPE_BROWSER_FARM",
+					NodeName:   "server-lite",
+					PublicIPv4: "",
+					Timestamp:  time.Now().UTC().Format(time.RFC3339),
+					NodeDetails: []map[string]any{
+						{
+							"appName": "INTERCEPT_APP_TYPE_CHROME",
+							"appNum":  1,
+						},
+					},
+				}
+				b, _ := json.Marshal(hb)
+				rec := &kgo.Record{Topic: cfg.KafkaHeartbeatTopic, Key: []byte(fmt.Sprint(time.Now().UnixNano())), Value: b}
+				cl.Produce(context.Background(), rec, func(r *kgo.Record, err error) {
+					if err != nil {
+						log.Printf("heartbeat produce failed: %v", err)
+					}
+				})
+				<-tk.C
+			}
+		}()
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		rt.mu.Lock()
@@ -642,6 +683,7 @@ func main() {
 			"pageTabs": countPages(tabs),
 			"inTopic":  cfg.KafkaInTopic,
 			"outTopic": cfg.KafkaOutTopic,
+			"heartbeatTopic": cfg.KafkaHeartbeatTopic,
 		})
 	})
 
