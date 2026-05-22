@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -37,16 +38,16 @@ type Config struct {
 	NacosGroup     string
 	NacosDataID    string
 
-	KafkaBrokers  string
-	KafkaInBrokers string
-	KafkaOutBrokers string
+	KafkaBrokers          string
+	KafkaInBrokers        string
+	KafkaOutBrokers       string
 	KafkaHeartbeatBrokers string
-	KafkaGroup    string
-	KafkaInTopic  string
-	KafkaOutTopic string
-	KafkaHeartbeatTopic string
-	KafkaUser     string
-	KafkaPass     string
+	KafkaGroup            string
+	KafkaInTopic          string
+	KafkaOutTopic         string
+	KafkaHeartbeatTopic   string
+	KafkaUser             string
+	KafkaPass             string
 
 	Serial   string
 	Package  string
@@ -94,11 +95,11 @@ type NodeMessage struct {
 }
 
 type HeartbeatMessage struct {
-	ReportType string `json:"reportType"`
-	NodeType   string `json:"nodeType"`
-	NodeName   string `json:"nodeName"`
-	PublicIPv4 string `json:"publicIpv4"`
-	Timestamp  string `json:"timestamp"`
+	ReportType  string           `json:"reportType"`
+	NodeType    string           `json:"nodeType"`
+	NodeName    string           `json:"nodeName"`
+	PublicIPv4  string           `json:"publicIpv4"`
+	Timestamp   string           `json:"timestamp"`
 	NodeDetails []map[string]any `json:"nodeDetails"`
 }
 
@@ -345,6 +346,105 @@ func cdpCall(conn *websocket.Conn, id int, method string, params map[string]any)
 	}
 }
 
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	return strings.TrimPrefix(h, "www.")
+}
+
+func pickTargetTabIDByURL(tabs []map[string]any, targetURL string) string {
+	reqHost := hostOf(targetURL)
+	best := ""
+	bestScore := -1
+	for _, t := range tabs {
+		if !strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+			continue
+		}
+		id := fmt.Sprintf("%v", t["id"])
+		if id == "" || id == "<nil>" {
+			continue
+		}
+		score := 0
+		u := fmt.Sprintf("%v", t["url"])
+		th := hostOf(u)
+		if reqHost != "" && th != "" && strings.Contains(th, reqHost) {
+			score += 60
+		}
+		if strings.HasPrefix(strings.ToLower(u), "http://") || strings.HasPrefix(strings.ToLower(u), "https://") {
+			score += 20
+		}
+		desc := fmt.Sprintf("%v", t["description"])
+		if desc != "" && desc != "<nil>" {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(desc), &m); err == nil {
+				if v, ok := m["visible"].(bool); ok && v {
+					score += 10
+				}
+				if v, ok := m["attached"].(bool); ok && v {
+					score += 10
+				}
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = id
+		}
+	}
+	return best
+}
+
+func detectBlockedOnTab(tabID, wsURL, targetURL string, timeout time.Duration) (bool, map[string]any, error) {
+	if strings.TrimSpace(wsURL) == "" {
+		return false, nil, fmt.Errorf("empty ws url")
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return false, nil, err
+	}
+	defer conn.Close()
+
+	if _, err := cdpCall(conn, 1, "Page.enable", nil); err != nil {
+		return false, nil, err
+	}
+	if _, err := cdpCall(conn, 2, "Network.enable", nil); err != nil {
+		return false, nil, err
+	}
+	if _, err := cdpCall(conn, 3, "Page.navigate", map[string]any{"url": targetURL}); err != nil {
+		return false, nil, err
+	}
+
+	deadline := time.Now().Add(timeout)
+	_ = conn.SetReadDeadline(deadline)
+	blocked := false
+	evidence := map[string]any{
+		"tabId": tabID,
+		"url":   targetURL,
+	}
+	for time.Now().Before(deadline) {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			break
+		}
+		method, _ := msg["method"].(string)
+		if method != "Network.loadingFailed" {
+			continue
+		}
+		params, _ := msg["params"].(map[string]any)
+		errorText := fmt.Sprintf("%v", params["errorText"])
+		blockedReason := fmt.Sprintf("%v", params["blockedReason"])
+		evidence["errorText"] = errorText
+		evidence["blockedReason"] = blockedReason
+		if strings.Contains(strings.ToUpper(errorText), "ERR_BLOCKED") || strings.Contains(strings.ToLower(blockedReason), "blocked") {
+			blocked = true
+			break
+		}
+	}
+	return blocked, evidence, nil
+}
+
 func (rt *Runtime) openURL(targetURL string) error {
 	if _, err := run("adb", "-s", rt.cfg.Serial, "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", targetURL, rt.cfg.Package); err == nil {
 		return nil
@@ -379,6 +479,9 @@ func (rt *Runtime) detect(urlStr string) (bool, string, error) {
 		strategy = "reuse_idle"
 		rt.busy[idle] = true
 		defer func() { rt.busy[idle] = false }()
+		if err := rt.activate(idle); err != nil {
+			return false, "", err
+		}
 		if err := rt.navigateByTabID(idle, urlStr); err != nil {
 			return false, "", err
 		}
@@ -393,9 +496,45 @@ func (rt *Runtime) detect(urlStr string) (bool, string, error) {
 		return false, "", err
 	}
 	rt.syncBusy(tabsAfter)
-	detail := fmt.Sprintf(`{"strategy":%q,"reuseTabId":%q,"maxTabs":%d,"pageTabs":%d,"socket":%q,"port":%d,"url":%q}`,
-		strategy, reuseTabID, rt.cfg.MaxTabs, countPages(tabsAfter), rt.socket, rt.cfg.Port, urlStr)
-	return false, detail, nil
+	selectedTabID := reuseTabID
+	if selectedTabID == "" {
+		selectedTabID = pickTargetTabIDByURL(tabsAfter, urlStr)
+	}
+
+	blocked := false
+	evidence := map[string]any{}
+	if strings.TrimSpace(selectedTabID) != "" {
+		var wsURL string
+		for _, t := range tabsAfter {
+			if fmt.Sprintf("%v", t["id"]) == selectedTabID {
+				wsURL = fmt.Sprintf("%v", t["webSocketDebuggerUrl"])
+				break
+			}
+		}
+		if wsURL != "" {
+			b, ev, err := detectBlockedOnTab(selectedTabID, wsURL, urlStr, 4*time.Second)
+			if err == nil {
+				blocked = b
+				evidence = ev
+			}
+		}
+	}
+
+	detailObj := map[string]any{
+		"strategy":    strategy,
+		"reuseTabId":  reuseTabID,
+		"targetTabId": selectedTabID,
+		"maxTabs":     rt.cfg.MaxTabs,
+		"pageTabs":    countPages(tabsAfter),
+		"socket":      rt.socket,
+		"port":        rt.cfg.Port,
+		"url":         urlStr,
+	}
+	if len(evidence) > 0 {
+		detailObj["blockedEvidence"] = evidence
+	}
+	raw, _ := json.Marshal(detailObj)
+	return blocked, string(raw), nil
 }
 
 func parseBrokers(raw string) []string {
@@ -717,17 +856,17 @@ func main() {
 		}
 		tabs, _ := rt.listTabs()
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":       true,
-			"serial":   rt.cfg.Serial,
-			"socket":   rt.socket,
-			"port":     rt.cfg.Port,
-			"maxTabs":  rt.cfg.MaxTabs,
-			"pageTabs": countPages(tabs),
-			"inTopic":  cfg.KafkaInTopic,
-			"outTopic": cfg.KafkaOutTopic,
-			"heartbeatTopic": cfg.KafkaHeartbeatTopic,
-			"inBrokers": inBrokers,
-			"outBrokers": outBrokers,
+			"ok":               true,
+			"serial":           rt.cfg.Serial,
+			"socket":           rt.socket,
+			"port":             rt.cfg.Port,
+			"maxTabs":          rt.cfg.MaxTabs,
+			"pageTabs":         countPages(tabs),
+			"inTopic":          cfg.KafkaInTopic,
+			"outTopic":         cfg.KafkaOutTopic,
+			"heartbeatTopic":   cfg.KafkaHeartbeatTopic,
+			"inBrokers":        inBrokers,
+			"outBrokers":       outBrokers,
 			"heartbeatBrokers": hbBrokers,
 		})
 	})
