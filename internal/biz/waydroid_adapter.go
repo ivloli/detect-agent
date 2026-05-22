@@ -32,9 +32,11 @@ type WaydroidAdapter struct {
 	enabled      bool
 	serial       string
 	portByApp    map[probecomm.InterceptAppType]int
+	maxTabsByApp map[probecomm.InterceptAppType]int
 	packageByApp map[probecomm.InterceptAppType]string
 	mu           sync.Mutex
 	socketByApp  map[probecomm.InterceptAppType]string
+	busyByApp    map[probecomm.InterceptAppType]map[string]bool
 }
 
 func NewWaydroidAdapter(logger log.Logger) *WaydroidAdapter {
@@ -43,16 +45,20 @@ func NewWaydroidAdapter(logger log.Logger) *WaydroidAdapter {
 		enabled:      strings.EqualFold(os.Getenv("DETECT_AGENT_WAYDROID_ENABLED"), "1") || strings.EqualFold(os.Getenv("DETECT_AGENT_WAYDROID_ENABLED"), "true"),
 		serial:       strings.TrimSpace(os.Getenv("DETECT_AGENT_WAYDROID_SERIAL")),
 		portByApp:    map[probecomm.InterceptAppType]int{},
+		maxTabsByApp: map[probecomm.InterceptAppType]int{},
 		packageByApp: map[probecomm.InterceptAppType]string{},
 		socketByApp:  map[probecomm.InterceptAppType]string{},
+		busyByApp:    map[probecomm.InterceptAppType]map[string]bool{},
 	}
 
 	adapter.packageByApp[probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME] = envOrDefault("DETECT_AGENT_WAYDROID_PACKAGE_CHROME", "com.mi.globalbrowser")
 	adapter.portByApp[probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME] = envIntOrDefault("DETECT_AGENT_WAYDROID_PORT_CHROME", 9222)
+	adapter.maxTabsByApp[probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME] = envIntOrDefault("DETECT_AGENT_WAYDROID_MAX_TABS_CHROME", 10)
 
 	// Optional extra mapping for QQ topic -> package if needed later.
 	adapter.packageByApp[probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ] = envOrDefault("DETECT_AGENT_WAYDROID_PACKAGE_QQ", "")
 	adapter.portByApp[probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ] = envIntOrDefault("DETECT_AGENT_WAYDROID_PORT_QQ", 9322)
+	adapter.maxTabsByApp[probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ] = envIntOrDefault("DETECT_AGENT_WAYDROID_MAX_TABS_QQ", 10)
 
 	if adapter.enabled {
 		adapter.logger.Infof("waydroid adapter enabled, serial=%s", adapter.serial)
@@ -108,12 +114,54 @@ func (a *WaydroidAdapter) Detect(ctx context.Context, appType probecomm.Intercep
 	if port <= 0 {
 		port = 9222
 	}
+	maxTabs := a.maxTabsByApp[appType]
+	if maxTabs <= 0 {
+		maxTabs = 10
+	}
+
+	// Keep socket fresh before scheduling.
+	sock := a.detectSocket(serial, pkg)
+	if sock != "" {
+		a.socketByApp[appType] = sock
+		_ = a.remapPort(serial, port, sock)
+	}
+
+	tabs, listErr := a.fetchTabs(port)
+	if listErr != nil {
+		// still try opening URL directly; capability may be socket-only
+		tabs = nil
+	}
+
+	strategy := "new"
+	reuseTabID := ""
+	if len(tabs) > 0 {
+		a.syncBusyMap(appType, tabs)
+		pageTabs := countPageTargets(tabs)
+		if pageTabs >= maxTabs {
+			idle := a.pickIdleTab(appType, tabs)
+			if idle == "" {
+				detail := fmt.Sprintf(`{"capability":"%s","strategy":"fail_no_idle","serial":"%s","socket":"%s","port":%d,"maxTabs":%d,"pageTabs":%d,"url":"%s"}`,
+					CapabilityCDPFull, serial, a.socketByApp[appType], port, maxTabs, pageTabs, targetURL)
+				return CapabilityCDPFull, false, detail, fmt.Errorf("no idle tab available")
+			}
+			strategy = "reuse_idle"
+			reuseTabID = idle
+			a.markBusy(appType, reuseTabID, true)
+			defer a.markBusy(appType, reuseTabID, false)
+		}
+	}
+
+	if reuseTabID != "" {
+		if err := a.activateTab(port, reuseTabID); err != nil {
+			return CapabilityCDPFull, false, "", fmt.Errorf("reuse tab activate failed: %w", err)
+		}
+	}
 
 	if err := a.openURL(serial, pkg, targetURL); err != nil {
 		return CapabilityNoCDP, false, "", err
 	}
 
-	sock := a.detectSocket(serial, pkg)
+	sock = a.detectSocket(serial, pkg)
 	if sock == "" {
 		return CapabilityNoCDP, false, fmt.Sprintf("package=%s socket not found", pkg), nil
 	}
@@ -123,26 +171,110 @@ func (a *WaydroidAdapter) Detect(ctx context.Context, appType probecomm.Intercep
 		return CapabilitySocketOnly, false, fmt.Sprintf("socket=%s remap failed: %v", sock, err), nil
 	}
 
+	tabs, err := a.fetchTabs(port)
+	if err != nil {
+		return CapabilitySocketOnly, false, fmt.Sprintf("socket=%s list endpoint unavailable: %v", sock, err), nil
+	}
+	a.syncBusyMap(appType, tabs)
+
+	blocked := false
+	detail := fmt.Sprintf(`{"capability":"%s","strategy":"%s","reuseTabId":"%s","serial":"%s","socket":"%s","port":%d,"maxTabs":%d,"tabs":%d,"url":"%s"}`,
+		CapabilityCDPFull, strategy, reuseTabID, serial, sock, port, maxTabs, len(tabs), targetURL)
+	return CapabilityCDPFull, blocked, detail, nil
+}
+
+func (a *WaydroidAdapter) fetchTabs(port int) ([]map[string]any, error) {
 	listURL := fmt.Sprintf("http://127.0.0.1:%d/json/list", port)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(listURL)
 	if err != nil {
-		return CapabilitySocketOnly, false, fmt.Sprintf("socket=%s list endpoint unavailable: %v", sock, err), nil
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return CapabilitySocketOnly, false, fmt.Sprintf("socket=%s list status=%d", sock, resp.StatusCode), nil
+		return nil, fmt.Errorf("list status=%d", resp.StatusCode)
 	}
-
 	var tabs []map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&tabs); err != nil {
-		return CapabilitySocketOnly, false, fmt.Sprintf("socket=%s list decode failed: %v", sock, err), nil
+		return nil, err
 	}
+	return tabs, nil
+}
 
-	blocked := false
-	detail := fmt.Sprintf(`{"capability":"%s","serial":"%s","socket":"%s","port":%d,"tabs":%d,"url":"%s"}`,
-		CapabilityCDPFull, serial, sock, port, len(tabs), targetURL)
-	return CapabilityCDPFull, blocked, detail, nil
+func countPageTargets(tabs []map[string]any) int {
+	n := 0
+	for _, t := range tabs {
+		if strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+			n++
+		}
+	}
+	return n
+}
+
+func (a *WaydroidAdapter) syncBusyMap(appType probecomm.InterceptAppType, tabs []map[string]any) {
+	if a.busyByApp[appType] == nil {
+		a.busyByApp[appType] = map[string]bool{}
+	}
+	alive := map[string]struct{}{}
+	for _, t := range tabs {
+		if !strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+			continue
+		}
+		id := fmt.Sprintf("%v", t["id"])
+		if id == "" || id == "<nil>" {
+			continue
+		}
+		alive[id] = struct{}{}
+		if _, ok := a.busyByApp[appType][id]; !ok {
+			a.busyByApp[appType][id] = false
+		}
+	}
+	for id := range a.busyByApp[appType] {
+		if _, ok := alive[id]; !ok {
+			delete(a.busyByApp[appType], id)
+		}
+	}
+}
+
+func (a *WaydroidAdapter) pickIdleTab(appType probecomm.InterceptAppType, tabs []map[string]any) string {
+	a.syncBusyMap(appType, tabs)
+	for _, t := range tabs {
+		if !strings.EqualFold(fmt.Sprintf("%v", t["type"]), "page") {
+			continue
+		}
+		id := fmt.Sprintf("%v", t["id"])
+		if id == "" || id == "<nil>" {
+			continue
+		}
+		if !a.busyByApp[appType][id] {
+			return id
+		}
+	}
+	return ""
+}
+
+func (a *WaydroidAdapter) markBusy(appType probecomm.InterceptAppType, tabID string, busy bool) {
+	if strings.TrimSpace(tabID) == "" {
+		return
+	}
+	if a.busyByApp[appType] == nil {
+		a.busyByApp[appType] = map[string]bool{}
+	}
+	a.busyByApp[appType][tabID] = busy
+}
+
+func (a *WaydroidAdapter) activateTab(port int, tabID string) error {
+	actURL := fmt.Sprintf("http://127.0.0.1:%d/json/activate/%s", port, tabID)
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Get(actURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("activate status=%d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (a *WaydroidAdapter) openURL(serial, pkg, targetURL string) error {
