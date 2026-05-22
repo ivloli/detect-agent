@@ -67,8 +67,9 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 	// 先取一个使用未超限且有空余tab的浏览器
 	var targetBrowser *Browser
 	for i := 0; i < len(herd.availableBrowsers); i++ {
-		targetBrowser = herd.availableBrowsers[i]
-		if targetBrowser.DetectedJobNum+targetBrowser.DetectingJobNum < BrowserMaxDetectNum && len(targetBrowser.tabs) > 0 {
+		b := herd.availableBrowsers[i]
+		if b.DetectedJobNum+b.DetectingJobNum < BrowserMaxDetectNum && len(b.tabs) > 0 {
+			targetBrowser = b
 			break
 		}
 	}
@@ -116,6 +117,9 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 			herd.standBy = newInstance
 			herd.mu.Unlock()
 		}(herd)
+	}
+	if len(targetBrowser.tabs) == 0 {
+		return nil, nil, fmt.Errorf("no available tabs in target browser")
 	}
 	tab := targetBrowser.tabs[len(targetBrowser.tabs)-1]
 	targetBrowser.tabs = targetBrowser.tabs[:len(targetBrowser.tabs)-1]

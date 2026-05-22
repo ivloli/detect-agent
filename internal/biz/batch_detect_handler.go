@@ -108,7 +108,7 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 		h.handler.logger.Errorf("Handle unmarshal chromium payload json to InterceptDetectParam failed: %v", err)
 		output.Error = err.Error()
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-		h.sendResult(ctx, msg, output, CodeError, "unmarshal failed", err.Error(), resTopic)
+		h.sendResult(ctx, msg, output, CodeError, "unmarshal failed", err.Error(), resTopic, h.appType)
 		return nil
 	}
 	newCtx, cancel := context.WithTimeout(ctx, time.Duration(msg.GetTimeoutSec())*time.Second)
@@ -119,7 +119,7 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 		h.handler.logger.Errorf("Handle get available browser failed: %v", err)
 		output.Error = err.Error()
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-		h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic)
+		h.sendResult(ctx, msg, output, CodeError, "no browser available", err.Error(), resTopic, h.appType)
 		return nil
 	}
 	defer h.handler.browserShepherd.ReleaseBrowserTab(h.appType, browser, tab)
@@ -130,7 +130,7 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 		h.handler.logger.Errorf("Handle detect browser failed: %v, url: %s", err, param.Url)
 		output.Error = err.Error()
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
-		h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic)
+		h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic, h.appType)
 		return nil
 	}
 	if blocked {
@@ -138,12 +138,12 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 	} else {
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL
 	}
-	h.sendResult(ctx, msg, output, CodeSuccess, "", "", resTopic)
+	h.sendResult(ctx, msg, output, CodeSuccess, "", "", resTopic, h.appType)
 	return nil
 }
 
 func (h *ChromiumBatchHandler) sendResult(ctx context.Context, in *ctrlplanev1.TaskCreateRequest,
-	out *localapiv1.InterceptDetectResult, code int32, msg, raw, topic string) {
+	out *localapiv1.InterceptDetectResult, code int32, msg, raw, topic string, appType probecomm.InterceptAppType) {
 	if h.handler.producer == nil {
 		h.handler.logger.Error("sendResult producer is nil, skip sending")
 		return
@@ -153,7 +153,7 @@ func (h *ChromiumBatchHandler) sendResult(ctx context.Context, in *ctrlplanev1.T
 		h.handler.logger.Errorf("sendResult marshal out json failed: %v", err)
 		return
 	}
-	res := buildResult(in, code, msg, raw, string(outJSONBytes))
+	res := buildResult(in, code, msg, raw, string(outJSONBytes), appType)
 	resBytes, err := json.Marshal(res)
 	if err != nil {
 		h.handler.logger.Errorf("sendResult marshal result failed: %v", err)
@@ -165,12 +165,12 @@ func (h *ChromiumBatchHandler) sendResult(ctx context.Context, in *ctrlplanev1.T
 	}
 }
 
-func buildResult(in *ctrlplanev1.TaskCreateRequest, code int32, msg, raw, outJSON string) *ctrlplanev1.NodeMessage {
+func buildResult(in *ctrlplanev1.TaskCreateRequest, code int32, msg, raw, outJSON string, appType probecomm.InterceptAppType) *ctrlplanev1.NodeMessage {
 	return &ctrlplanev1.NodeMessage{
 		EventType: ctrlplanev1.EventType_EVENT_TYPE_EXEC_RESULT,
 		MessageId: ulid.Make().String(),
 		Timestamp: time.Now().UnixMilli(),
-		NodeId:    "", //todo: 待定
+		NodeId:    appType.String(),
 		TaskMeta:  in.GetTaskMeta(),
 		MsgStatus: ctrlplanev1.MessageStatus_MESSAGE_STATUS_COMPLETE,
 		EventData: &ctrlplanev1.NodeMessage_ExecResult{
