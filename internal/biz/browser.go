@@ -92,7 +92,16 @@ func (b *Browser) CloseTabPool() {
 func (b *Browser) ChromiumDetect(ctx context.Context, tab *PooledTab, urlStr string) (bool, string, error) {
 	tab.Detector.Reset()
 
-	runErr := chromedp.Run(ctx,
+	// 使用 tab.Ctx (chromedp 上下文) 作为 chromedp 操作的基础上下文,
+	// 并从传入的 ctx 中继承超时/截止时间, 以确保 chromedp 能正确提取 target 信息
+	detectCtx := tab.Ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		detectCtx, cancel = context.WithDeadline(tab.Ctx, deadline)
+		defer cancel()
+	}
+
+	runErr := chromedp.Run(detectCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			_, _, _, _, err := page.Navigate(urlStr).Do(ctx)
 			return err
