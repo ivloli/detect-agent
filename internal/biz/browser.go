@@ -15,7 +15,7 @@ import (
 const (
 	BlockErrKeyword    = "ERR_BLOCKED"          // 浏览器拦截报错关键字
 	BlockDetectTimeout = 400 * time.Millisecond // 用比较短的超时来进行探测，浏览器拦截报错很快，不需要等网页完全加载完
-	TabPoolSize        = 10                     // 每个浏览器开50个tab复用
+	TabPoolSize        = 10                     // 每个浏览器开10个tab复用
 )
 
 // Browser 浏览器
@@ -42,6 +42,14 @@ type PooledTab struct {
 }
 
 func (b *Browser) InitTabPool() error {
+	// 先清理旧的上下文，避免资源泄漏
+	if b.allocCancel != nil {
+		b.allocCancel()
+	}
+	if b.browserCancel != nil {
+		b.browserCancel()
+	}
+
 	// 使用 RemoteAllocator 建立到浏览器的 WebSocket 连接, allocCtx=chrome进程
 	b.allocCtx, b.allocCancel = chromedp.NewRemoteAllocator(context.Background(), b.AttachUrl)
 
@@ -53,6 +61,12 @@ func (b *Browser) InitTabPool() error {
 		// 初始化 tab, 确保 Target 被成功创建和附加，并启用网络监听
 		if err := chromedp.Run(tabCtx, network.Enable()); err != nil {
 			b.CloseTabPool()
+			if b.browserCancel != nil {
+				b.browserCancel()
+			}
+			if b.allocCancel != nil {
+				b.allocCancel()
+			}
 			return err
 		}
 

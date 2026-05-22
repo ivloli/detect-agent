@@ -45,12 +45,13 @@ func (s *BrowserShepherd) StartMonitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			go s.HerdHealthCheck(s.HerdChrome)
-			go s.HerdHealthCheck(s.HerdEdge)
-			go s.HerdHealthCheck(s.Herd360)
-			go s.HerdHealthCheck(s.HerdUC)
-			go s.HerdHealthCheck(s.HerdQuark)
-			go s.HerdHealthCheck(s.HerdQQ)
+			// 串行执行，避免多个HerdHealthCheck goroutine并发写同一个herd导致竞态
+			s.HerdHealthCheck(s.HerdChrome)
+			s.HerdHealthCheck(s.HerdEdge)
+			s.HerdHealthCheck(s.Herd360)
+			s.HerdHealthCheck(s.HerdUC)
+			s.HerdHealthCheck(s.HerdQuark)
+			s.HerdHealthCheck(s.HerdQQ)
 		}
 	}
 }
@@ -81,15 +82,16 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 			targetBrowser = herd.standBy
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 			herd.standBy = nil
-			go func() {
-				newInstance, err := herd.CreateChromiumInstance(herd.logger, true)
-				if err != nil {
-					panic(err)
+			// 异步创建新的冷备，用局部变量避免闭包捕获err
+			go func(herd *BrowserHerd) {
+				newInstance, instanceErr := herd.CreateChromiumInstance(herd.logger, true)
+				if instanceErr != nil {
+					panic(instanceErr)
 				}
 				herd.mu.Lock()
-				defer herd.mu.Unlock()
 				herd.standBy = newInstance
-			}()
+				herd.mu.Unlock()
+			}(herd)
 		} else { // 冷备是空，说明在创建中，直接返回错误
 			return nil, nil, fmt.Errorf("no free browser available")
 		}
@@ -105,15 +107,15 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 		}
 		herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 		herd.standBy = nil
-		go func() {
-			newInstance, err := herd.CreateChromiumInstance(herd.logger, true)
-			if err != nil {
-				panic(err)
+		go func(herd *BrowserHerd) {
+			newInstance, instanceErr := herd.CreateChromiumInstance(herd.logger, true)
+			if instanceErr != nil {
+				panic(instanceErr)
 			}
 			herd.mu.Lock()
-			defer herd.mu.Unlock()
 			herd.standBy = newInstance
-		}()
+			herd.mu.Unlock()
+		}(herd)
 	}
 	tab := targetBrowser.tabs[len(targetBrowser.tabs)-1]
 	targetBrowser.tabs = targetBrowser.tabs[:len(targetBrowser.tabs)-1]
@@ -124,6 +126,7 @@ func (s *BrowserShepherd) GetAvailableBrowserTab(appType probecomm.InterceptAppT
 func (s *BrowserShepherd) ReleaseBrowserTab(appType probecomm.InterceptAppType, browser *Browser, tab *PooledTab) error {
 	herd, err := s.getBrowserHerd(appType)
 	if err != nil {
+		tab.Cancel()
 		return err
 	}
 	herd.mu.Lock()
@@ -135,9 +138,10 @@ func (s *BrowserShepherd) ReleaseBrowserTab(appType probecomm.InterceptAppType, 
 			break
 		}
 	}
-	// 如果没找到，可能是因为浏览器实例本身有问题，已经被健康检查任务干掉了，记录日志即可
+	// 如果没找到，可能是因为浏览器实例本身有问题，已经被健康检查任务干掉了，记录日志并释放tab
 	if index == -1 {
-		s.logger.Infof("browser port %d not found in herd", browser.Port)
+		s.logger.Infof("browser port %d not found in herd, releasing tab", browser.Port)
+		tab.Cancel()
 		return nil
 	}
 	browser.DetectedJobNum++
@@ -164,12 +168,15 @@ func (s *BrowserShepherd) ReleaseBrowserTab(appType probecomm.InterceptAppType, 
 			}
 			herd.availableBrowsers = append(herd.availableBrowsers, herd.standBy)
 			herd.standBy = nil
-			go func() {
-				herd.standBy, err = herd.CreateChromiumInstance(herd.logger, true)
-				if err != nil {
-					panic(err)
+			go func(herd *BrowserHerd) {
+				newInstance, instanceErr := herd.CreateChromiumInstance(herd.logger, true)
+				if instanceErr != nil {
+					panic(instanceErr)
 				}
-			}()
+				herd.mu.Lock()
+				herd.standBy = newInstance
+				herd.mu.Unlock()
+			}(herd)
 		}
 	}
 	return nil
@@ -207,7 +214,7 @@ func (s *BrowserShepherd) GetBrowserDetails() []*ctrlplanev1.InterceptNodeDetail
 	return res
 }
 
-// HerdHealthCheck 对浏览器集群做健康检查
+// HerdHealthCheck 对浏览器集群做健康检查，整个方法仅由StartMonitor串行调用，与GetAvailableBrowserTab/ReleaseBrowserTab通过herd.mu互斥
 func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 	// 先确保冷备可用
 	if herd.standBy != nil {
@@ -218,8 +225,8 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 			if err != nil {
 				panic(err)
 			}
-			old := herd.standBy
 			herd.mu.Lock()
+			old := herd.standBy
 			herd.standBy = b
 			herd.mu.Unlock()
 			err = herd.KillChromiumInstance(old)
@@ -244,7 +251,7 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 			s.logger.Infof("available browser unhealthy: %v, try to replace with standby", err)
 			old := herd.availableBrowsers[i]
 
-			// 在锁外获取standBy，避免长时间持有锁
+			// 锁内快速获取standBy指针，避免长时间持有锁
 			herd.mu.Lock()
 			sb := herd.standBy
 			herd.mu.Unlock()
