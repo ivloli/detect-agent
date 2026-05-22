@@ -1,0 +1,26 @@
+{
+  "eventType": "EVENT_TYPE_EXEC_RESULT",
+  "messageId": "01JXXXXXXX",
+  "timestamp": 1779352942250,
+  "nodeId": "",
+  "taskMeta": {
+    "taskId": "demo-kafka-1",
+    "taskSeqId": "1"
+  },
+  "msgStatus": "MESSAGE_STATUS_COMPLETE",
+  "eventData": {
+    "execResult": {
+      "in": {
+        "timeoutSec": 10,
+        "deadline": "",
+        "type": "INTERCEPT_DETECT",
+        "payloadJson": "{\"url\":\"https://example.com\"}"
+      },
+      "errorCode": 200,
+      "errorMessage": "",
+      "errorRawMessage": "",
+      "finishedAt": "2026-05-21T08:42:22Z",
+      "outputJson": "{\"app\":\"com.mi.globalbrowser\",\"status\":\"NORMAL\",\"error\":\"\",\"rawResult\":\"{...}\"}"
+    }
+  }
+}

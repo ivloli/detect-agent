@@ -1,0 +1,10 @@
+{
+  "timeoutSec": 10,
+  "deadline": "",
+  "type": "INTERCEPT_DETECT",
+  "payloadJson": "{\"url\":\"https://example.com\"}",
+  "taskMeta": {
+    "taskId": "demo-kafka-1",
+    "taskSeqId": "1"
+  }
+}
