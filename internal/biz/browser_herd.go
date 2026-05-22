@@ -147,13 +147,20 @@ func (h *BrowserHerd) CreateChromiumInstance(logger *log.Helper, isStandBy bool)
 
 // KillChromiumInstance kill掉chromium内核浏览器实例
 func (h *BrowserHerd) KillChromiumInstance(b *Browser) error {
+	if b == nil {
+		return fmt.Errorf("browser instance is nil")
+	}
 	b.CloseTabPool()
-	b.browserCancel()
-	b.allocCancel()
-	if b != nil && b.Process != nil {
+	if b.browserCancel != nil {
+		b.browserCancel()
+	}
+	if b.allocCancel != nil {
+		b.allocCancel()
+	}
+	if b.Process != nil {
 		return b.Process.Kill()
 	}
-	return fmt.Errorf("browser instance is nil")
+	return fmt.Errorf("browser instance process is nil")
 }
 
 func (h *BrowserHerd) getAvailablePort() int {
@@ -170,25 +177,67 @@ func (h *BrowserHerd) getAvailablePort() int {
 	return -1
 }
 
-// BrowserHealthCheck 对浏览器做健康检查
-func (h *BrowserHerd) BrowserHealthCheck(browser *Browser) (string, error) {
-	if browser == nil {
-		h.logger.Error("browser instance is nil")
+// BrowserHealthCheck 检查浏览器实例存活
+func (h *BrowserHerd) BrowserHealthCheck(b *Browser) (string, error) {
+	if b == nil {
 		return "", fmt.Errorf("browser instance is nil")
 	}
-	resp, err := http.Get(browser.HealthCheckUrl)
+	resp, err := http.Get(b.HealthCheckUrl)
 	if err != nil {
-		h.logger.Errorf("failed to get ws debugger url: %v", err)
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("health check failed, status code: %d", resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		h.logger.Errorf("failed to decode ws debugger url: %v", err)
-		return "", err
+
+	var objmap map[string]json.RawMessage
+	err = json.NewDecoder(resp.Body).Decode(&objmap)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode health check response: %w", err)
 	}
-	return result.WebSocketDebuggerURL, nil
+
+	wsUrl := string(objmap["webSocketDebuggerUrl"])
+	// 去除引号
+	wsUrl = strings.Trim(wsUrl, "\"")
+	return wsUrl, nil
+}
+
+// GetIdleBrowser 获取正在探测数最少的浏览器实例
+func (h *BrowserHerd) GetIdleBrowser() *Browser {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if len(h.availableBrowsers) == 0 {
+		return nil
+	}
+	idle := h.availableBrowsers[0]
+	for _, b := range h.availableBrowsers {
+		if b.DetectingJobNum < idle.DetectingJobNum {
+			idle = b
+		}
+	}
+	return idle
+}
+
+func (h *BrowserHerd) ForceRestBrowser(b *Browser) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for i, bv := range h.availableBrowsers {
+		if bv == b {
+			err := h.KillChromiumInstance(b)
+			if err != nil {
+				h.logger.Errorf("failed to kill browser instance: %v", err)
+			}
+			newB, err := h.CreateChromiumInstance(h.logger, false)
+			if err != nil {
+				return false
+			}
+			h.availableBrowsers[i] = newB
+			return true
+		}
+	}
+	return false
 }

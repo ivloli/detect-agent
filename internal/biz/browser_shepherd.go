@@ -210,21 +210,32 @@ func (s *BrowserShepherd) GetBrowserDetails() []*ctrlplanev1.InterceptNodeDetail
 // HerdHealthCheck 对浏览器集群做健康检查
 func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 	// 先确保冷备可用
-	_, err := herd.BrowserHealthCheck(herd.standBy)
-	if err != nil {
-		s.logger.Infof("standby browser unhealthy: %v, try to recover", err)
+	if herd.standBy != nil {
+		_, err := herd.BrowserHealthCheck(herd.standBy)
+		if err != nil {
+			s.logger.Infof("standby browser unhealthy: %v, try to recover", err)
+			b, err := herd.CreateChromiumInstance(herd.logger, true)
+			if err != nil {
+				panic(err)
+			}
+			old := herd.standBy
+			herd.mu.Lock()
+			herd.standBy = b
+			herd.mu.Unlock()
+			err = herd.KillChromiumInstance(old)
+			if err != nil {
+				s.logger.Errorf("failed to kill browser instance: %v", err)
+			}
+		}
+	} else {
+		s.logger.Info("standby browser is nil, creating new one")
 		b, err := herd.CreateChromiumInstance(herd.logger, true)
 		if err != nil {
 			panic(err)
 		}
-		old := herd.standBy
 		herd.mu.Lock()
 		herd.standBy = b
 		herd.mu.Unlock()
-		err = herd.KillChromiumInstance(old)
-		if err != nil {
-			s.logger.Errorf("failed to kill browser instance: %v", err)
-		}
 	}
 	// 再逐个检查使用中的浏览器健康状况，不健康的浏览器用备用的替换掉，再新建备用，并kill旧的
 	for i := 0; i < len(herd.availableBrowsers); i++ {
@@ -232,15 +243,54 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 		if err != nil {
 			s.logger.Infof("available browser unhealthy: %v, try to replace with standby", err)
 			old := herd.availableBrowsers[i]
+
+			// 在锁外获取standBy，避免长时间持有锁
 			herd.mu.Lock()
-			err = herd.standBy.InitTabPool()
+			sb := herd.standBy
+			herd.mu.Unlock()
+
+			if sb == nil {
+				// 没有备用，直接重建
+				s.logger.Info("no standby available, recreating browser directly")
+				b, createErr := herd.CreateChromiumInstance(herd.logger, false)
+				if createErr != nil {
+					s.logger.Errorf("failed to recreate browser instance: %v", createErr)
+					panic(createErr)
+				}
+				herd.mu.Lock()
+				herd.availableBrowsers[i] = b
+				herd.mu.Unlock()
+				err = herd.KillChromiumInstance(old)
+				if err != nil {
+					s.logger.Errorf("failed to kill browser instance: %v", err)
+				}
+				continue
+			}
+
+			err = sb.InitTabPool()
 			if err != nil {
 				s.logger.Errorf("failed to init standBy tab pool: %v", err)
-				return err
+				// standby tab初始化失败，直接重建一个新实例替代
+				b, createErr := herd.CreateChromiumInstance(herd.logger, false)
+				if createErr != nil {
+					s.logger.Errorf("failed to create new browser instance: %v", createErr)
+					panic(createErr)
+				}
+				herd.mu.Lock()
+				herd.availableBrowsers[i] = b
+				herd.mu.Unlock()
+				err = herd.KillChromiumInstance(old)
+				if err != nil {
+					s.logger.Errorf("failed to kill browser instance: %v", err)
+				}
+				continue
 			}
-			herd.availableBrowsers[i] = herd.standBy
+
+			herd.mu.Lock()
+			herd.availableBrowsers[i] = sb
 			herd.standBy = nil
 			herd.mu.Unlock()
+
 			b, err := herd.CreateChromiumInstance(herd.logger, true)
 			if err != nil {
 				panic(err)
@@ -248,6 +298,7 @@ func (s *BrowserShepherd) HerdHealthCheck(herd *BrowserHerd) error {
 			herd.mu.Lock()
 			herd.standBy = b
 			herd.mu.Unlock()
+
 			err = herd.KillChromiumInstance(old)
 			if err != nil {
 				s.logger.Errorf("failed to kill browser instance: %v", err)
