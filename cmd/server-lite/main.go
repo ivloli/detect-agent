@@ -61,11 +61,11 @@ type Config struct {
 }
 
 type TaskCreateRequest struct {
-	TimeoutSec  int             `json:"timeoutSec"`
+	TimeoutSec  int             `json:"timeout_sec"`
 	Deadline    string          `json:"deadline"`
 	Type        string          `json:"type"`
-	PayloadJSON string          `json:"payloadJson"`
-	TaskMeta    json.RawMessage `json:"taskMeta"`
+	PayloadJSON string          `json:"payload_json"`
+	TaskMeta    json.RawMessage `json:"task_meta"`
 }
 
 type InterceptParam struct {
@@ -81,21 +81,21 @@ type DetectOutput struct {
 
 type ExecResult struct {
 	In              TaskCreateRequest `json:"in"`
-	ErrorCode       int               `json:"errorCode"`
-	ErrorMessage    string            `json:"errorMessage"`
-	ErrorRawMessage string            `json:"errorRawMessage"`
-	FinishedAt      string            `json:"finishedAt"`
-	OutputJSON      string            `json:"outputJson"`
+	ErrorCode       int               `json:"error_code"`
+	ErrorMessage    string            `json:"error_message"`
+	ErrorRawMessage string            `json:"error_raw_message"`
+	FinishedAt      string            `json:"finished_at"`
+	OutputJSON      string            `json:"output_json"`
 }
 
 type NodeMessage struct {
-	EventType string         `json:"eventType"`
-	MessageID string         `json:"messageId"`
+	EventType int            `json:"event_type"`
+	MessageID string         `json:"message_id"`
 	Timestamp int64          `json:"timestamp"`
-	NodeID    string         `json:"nodeId"`
-	TaskMeta  any            `json:"taskMeta"`
-	MsgStatus string         `json:"msgStatus"`
-	EventData map[string]any `json:"eventData"`
+	NodeID    string         `json:"node_id"`
+	TaskMeta  any            `json:"task_meta"`
+	MsgStatus int            `json:"msg_status"`
+	EventData map[string]any `json:"EventData"`
 }
 
 type HeartbeatMessage struct {
@@ -702,17 +702,17 @@ func parseAddr(addr string) (string, int) {
 	return hp[0], port
 }
 
-func buildNodeMessage(in TaskCreateRequest, code int, msg, raw string, output DetectOutput) NodeMessage {
+func buildNodeMessage(in TaskCreateRequest, code int, msg, raw string, output DetectOutput, appType string) NodeMessage {
 	outJSON, _ := json.Marshal(output)
 	return NodeMessage{
-		EventType: "EVENT_TYPE_EXEC_RESULT",
+		EventType: 13,
 		MessageID: fmt.Sprintf("lite-%d-%d", time.Now().UnixMilli(), rand.Intn(100000)),
 		Timestamp: time.Now().UnixMilli(),
-		NodeID:    "",
+		NodeID:    appType,
 		TaskMeta:  rawOrNil(in.TaskMeta),
-		MsgStatus: "MESSAGE_STATUS_COMPLETE",
+		MsgStatus: 2,
 		EventData: map[string]any{
-			"execResult": ExecResult{
+			"ExecResult": ExecResult{
 				In:              in,
 				ErrorCode:       code,
 				ErrorMessage:    msg,
@@ -841,7 +841,7 @@ func main() {
 				}
 				var p InterceptParam
 				if err := json.Unmarshal([]byte(in.PayloadJSON), &p); err != nil || strings.TrimSpace(p.URL) == "" {
-					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: "invalid payloadJson", RawResult: ""})
+					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: "invalid payloadJson", RawResult: ""}, cfg.AppType)
 					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
@@ -850,7 +850,7 @@ func main() {
 				blocked, detail, err := rt.detect(p.URL)
 				cancel()
 				if err != nil {
-					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: err.Error(), RawResult: detail})
+					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: err.Error(), RawResult: detail}, cfg.AppType)
 					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
@@ -858,7 +858,7 @@ func main() {
 				if blocked {
 					status = "BLOCKED"
 				}
-				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: cfg.AppType, Status: status, Error: "", RawResult: detail})
+				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: cfg.AppType, Status: status, Error: "", RawResult: detail}, cfg.AppType)
 				publishResult(outClient, cfg.KafkaOutTopic, out)
 			})
 		}
