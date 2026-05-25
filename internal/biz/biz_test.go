@@ -3,9 +3,15 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-kratos/kratos/v2/log"
 	probecomm "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/common/v1"
 	ctrlplanev1 "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/control-plane/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -253,6 +259,59 @@ func TestContextWithTimeout(t *testing.T) {
 		t.Fatal("deadline should be in the future")
 	}
 	t.Logf("Context deadline set: %v", deadline)
+}
+
+// ==================== Test getPublicIP ====================
+
+func TestGetPublicIP(t *testing.T) {
+	// 模拟 ifconfig.me 服务，验证请求中带有 curl User-Agent，并返回固定 IP
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua := r.UserAgent()
+		if !strings.Contains(ua, "curl") {
+			t.Errorf("expected User-Agent containing 'curl', got %q", ua)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("1.2.3.4"))
+	}))
+	defer srv.Close()
+
+	np := &NodeReporter{
+		logger:     log.NewHelper(log.NewStdLogger(io.Discard)),
+		httpClient: &http.Client{},
+	}
+
+	// 替换 httpClient 的 Transport，使其指向测试 server
+	np.httpClient.Transport = &urlRewriter{
+		target:   srv.URL,
+		original: http.DefaultTransport,
+	}
+
+	ip, err := np.getPublicIP()
+	if err != nil {
+		t.Fatalf("getPublicIP failed: %v", err)
+	}
+	if ip != "1.2.3.4" {
+		t.Fatalf("expected ip 1.2.3.4, got %s", ip)
+	}
+	t.Logf("public ip: %s", ip)
+}
+
+// urlRewriter 将请求重定向到指定的目标 URL，用于测试
+type urlRewriter struct {
+	target   string
+	original http.RoundTripper
+}
+
+func (u *urlRewriter) RoundTrip(req *http.Request) (*http.Response, error) {
+	targetURL, _ := url.Parse(u.target)
+	// 克隆请求并替换 URL
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = targetURL.Scheme
+	clone.URL.Host = targetURL.Host
+	clone.Host = targetURL.Host
+	// 需要重置 RequestURI，否则标准库会报错
+	clone.RequestURI = ""
+	return u.original.RoundTrip(clone)
 }
 
 // ==================== Test Wire ProviderSet ====================

@@ -25,6 +25,7 @@ type NodeReporter struct {
 	producer        *franz_kafka.KafkaProducer
 	hostname        string
 	publicIPv4      string
+	httpClient      *http.Client
 }
 
 func NewNodeReporter(logger log.Logger, producer *franz_kafka.KafkaProducer, browserShepherd *BrowserShepherd) *NodeReporter {
@@ -32,6 +33,7 @@ func NewNodeReporter(logger log.Logger, producer *franz_kafka.KafkaProducer, bro
 		logger:          log.NewHelper(logger),
 		producer:        producer,
 		browserShepherd: browserShepherd,
+		httpClient:      &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -63,7 +65,7 @@ func (np *NodeReporter) assembleReportMsg() *ctrlplanev1.InterceptNodeInfo {
 		NodeType:    ctrlplanev1.InterceptNodeType_INTERCEPT_NODE_TYPE_BROWSER_FARM, // todo: 跟移动端共用一套代码的话，这里要从本地配置读
 		NodeName:    np.hostname,
 		PublicIpv4:  np.publicIPv4,
-		Timestamp:   timestamppb.New(time.Now()),
+		Timestamp:   timestamppb.Now(),
 		NodeDetails: np.browserShepherd.GetBrowserDetails(),
 	}
 	return msg
@@ -86,10 +88,14 @@ func (np *NodeReporter) initNodeInfo() {
 	np.publicIPv4 = publicIP
 }
 
-// getPublicIP 通过 HTTP GET 请求 ifconfig.me 获取本机公网 IP
+// getPublicIP 通过 HTTP GET 请求 ifconfig.me 获取本机公网 IP（模拟 curl User-Agent）
 func (np *NodeReporter) getPublicIP() (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://ifconfig.me")
+	req, err := http.NewRequest("GET", "https://ifconfig.me", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "curl/8.7.1")
+	resp, err := np.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}

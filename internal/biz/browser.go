@@ -93,6 +93,17 @@ func (b *Browser) CloseTabPool() {
 func (b *Browser) ChromiumDetect(ctx context.Context, tab *PooledTab, urlStr string) (bool, string, error) {
 	tab.Detector.Reset()
 
+	// 重置 tab：停止当前正在进行的加载，导航到 about:blank 清除 CDP target 残留状态
+	resetCtx, resetCancel := context.WithTimeout(tab.Ctx, 2*time.Second)
+	_ = chromedp.Run(resetCtx,
+		page.StopLoading(),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, _, _, _, err := page.Navigate("about:blank").Do(ctx)
+			return err
+		}),
+	)
+	resetCancel()
+
 	// 规范化 URL：如果缺少协议前缀则自动补上 https://
 	normalizedURL := normalizeURL(urlStr)
 

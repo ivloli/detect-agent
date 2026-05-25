@@ -4,8 +4,8 @@ import (
 	"context"
 	"detect-agent/internal/conf"
 	"detect-agent/internal/pkg/franz-kafka"
-	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -13,6 +13,7 @@ import (
 	probecomm "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/common/v1"
 	ctrlplanev1 "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/control-plane/v1"
 	localapiv1 "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/local-api/v1"
+	"gitlab.gainetics.io/shared/singularity/kratosx"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -94,7 +95,7 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 	}
 
 	var msg *ctrlplanev1.TaskCreateRequest
-	if err := json.Unmarshal(value, &msg); err != nil {
+	if err := kratosx.Codec.Unmarshal(value, &msg); err != nil {
 		h.handler.logger.Errorf("Handle unmarshal chromium kafka msg to TaskCreateRequest failed: %v", err)
 		return err
 	}
@@ -104,11 +105,18 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 		RawResult: "",
 	}
 	var param *localapiv1.InterceptDetectParam
-	if err := json.Unmarshal([]byte(msg.GetPayloadJson()), &param); err != nil {
+	if err := kratosx.Codec.Unmarshal([]byte(msg.GetPayloadJson()), &param); err != nil {
 		h.handler.logger.Errorf("Handle unmarshal chromium payload json to InterceptDetectParam failed: %v", err)
 		output.Error = err.Error()
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
 		h.sendResult(ctx, msg, output, CodeError, "unmarshal failed", err.Error(), resTopic, h.appType)
+		return nil
+	}
+	if param.Url == "" || !strings.HasPrefix(param.Url, "http://") && !strings.HasPrefix(param.Url, "https://") {
+		h.handler.logger.Errorf("Handle input url illegal: %s", param.Url)
+		output.Error = fmt.Sprintf("input url illegal: %s", param.Url)
+		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
+		h.sendResult(ctx, msg, output, CodeError, "input url illegal", fmt.Sprintf("input url illegal: %s", param.Url), resTopic, h.appType)
 		return nil
 	}
 	newCtx, cancel := context.WithTimeout(ctx, time.Duration(msg.GetTimeoutSec())*time.Second)
@@ -127,7 +135,7 @@ func (h *ChromiumBatchHandler) Handle(ctx context.Context, key []byte, value []b
 	blocked, detail, err := browser.ChromiumDetect(newCtx, tab, param.Url)
 	output.RawResult = detail
 	if err != nil {
-		h.handler.logger.Errorf("Handle detect browser failed: %v, url: %s", err, param.Url)
+		h.handler.logger.Errorf("Handle detect browser failed: %v, url: %s, appType: %s", err, param.Url, h.appType.String())
 		output.Error = err.Error()
 		output.Status = localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL
 		h.sendResult(ctx, msg, output, CodeError, "detect on browser failed", err.Error(), resTopic, h.appType)
@@ -148,17 +156,18 @@ func (h *ChromiumBatchHandler) sendResult(ctx context.Context, in *ctrlplanev1.T
 		h.handler.logger.Error("sendResult producer is nil, skip sending")
 		return
 	}
-	outJSONBytes, err := json.Marshal(out)
+	outJSONBytes, err := kratosx.Codec.Marshal(out)
 	if err != nil {
 		h.handler.logger.Errorf("sendResult marshal out json failed: %v", err)
 		return
 	}
 	res := buildResult(in, code, msg, raw, string(outJSONBytes), appType)
-	resBytes, err := json.Marshal(res)
+	resBytes, err := kratosx.Codec.Marshal(res)
 	if err != nil {
 		h.handler.logger.Errorf("sendResult marshal result failed: %v", err)
 		return
 	}
+	h.handler.logger.Infof("sendResult kafka msg: %s", string(resBytes))
 	err = h.handler.producer.ProduceSync(ctx, topic, []byte(fmt.Sprint(time.Now())), resBytes)
 	if err != nil {
 		h.handler.logger.Errorf("sendResult send to kafka failed: %v", err)
@@ -184,7 +193,7 @@ func buildResult(in *ctrlplanev1.TaskCreateRequest, code int32, msg, raw, outJSO
 				ErrorCode:       code,
 				ErrorMessage:    msg,
 				ErrorRawMessage: raw,
-				FinishedAt:      timestamppb.New(time.Now()),
+				FinishedAt:      timestamppb.Now(),
 				OutputJson:      outJSON,
 			},
 		},
