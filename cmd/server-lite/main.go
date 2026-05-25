@@ -37,6 +37,9 @@ type Config struct {
 	NacosNamespace string
 	NacosGroup     string
 	NacosDataID    string
+	NacosLoadTried bool
+	NacosLoadOK    bool
+	NacosLoadError string
 
 	KafkaBrokers          string
 	KafkaInBrokers        string
@@ -550,12 +553,23 @@ func parseBrokers(raw string) []string {
 }
 
 func loadKafkaFromNacos(cfg *Config) {
+	cfg.NacosLoadTried = false
+	cfg.NacosLoadOK = false
+	cfg.NacosLoadError = ""
+
 	if strings.TrimSpace(cfg.KafkaBrokers) != "" || strings.TrimSpace(cfg.NacosAddr) == "" {
+		if strings.TrimSpace(cfg.KafkaBrokers) != "" {
+			cfg.NacosLoadError = "skipped: kafka brokers already provided"
+		} else {
+			cfg.NacosLoadError = "skipped: empty nacos addr"
+		}
 		return
 	}
+	cfg.NacosLoadTried = true
 	sc, err := buildServerConfigs(cfg.NacosAddr, cfg.NacosScheme)
 	if err != nil || len(sc) == 0 {
 		log.Printf("[server-lite] skip nacos load: %v", err)
+		cfg.NacosLoadError = fmt.Sprintf("build server config failed: %v", err)
 		return
 	}
 	cc := *constant.NewClientConfig(
@@ -576,16 +590,19 @@ func loadKafkaFromNacos(cfg *Config) {
 	content, err := client.GetConfig(vo.ConfigParam{DataId: cfg.NacosDataID, Group: cfg.NacosGroup})
 	if err != nil {
 		log.Printf("[server-lite] nacos get config failed: %v", err)
+		cfg.NacosLoadError = fmt.Sprintf("get config failed: %v", err)
 		return
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(content), &m); err != nil {
 		log.Printf("[server-lite] nacos config decode failed: %v", err)
 		log.Printf("[server-lite] nacos raw content (first 512): %s", clip(content, 512))
+		cfg.NacosLoadError = fmt.Sprintf("decode config failed: %v", err)
 		return
 	}
 	kv, _ := m["kafka"].(map[string]any)
 	if kv == nil {
+		cfg.NacosLoadError = "missing kafka section in nacos config"
 		return
 	}
 	if arr, ok := kv["brokers"].([]any); ok {
@@ -604,6 +621,7 @@ func loadKafkaFromNacos(cfg *Config) {
 	if cfg.KafkaOutTopic == "" {
 		cfg.KafkaOutTopic = fmt.Sprintf("%v", kv["intercept_detect_result_topic"])
 	}
+	cfg.NacosLoadOK = true
 	log.Printf("[server-lite] kafka loaded from nacos brokers=%s in=%s out=%s group=%s", cfg.KafkaBrokers, cfg.KafkaInTopic, cfg.KafkaOutTopic, cfg.KafkaGroup)
 }
 
@@ -868,6 +886,16 @@ func main() {
 			"inBrokers":        inBrokers,
 			"outBrokers":       outBrokers,
 			"heartbeatBrokers": hbBrokers,
+			"nacos": map[string]any{
+				"addr":       cfg.NacosAddr,
+				"namespace":  cfg.NacosNamespace,
+				"group":      cfg.NacosGroup,
+				"dataId":     cfg.NacosDataID,
+				"loadTried":  cfg.NacosLoadTried,
+				"loadOK":     cfg.NacosLoadOK,
+				"loadError":  cfg.NacosLoadError,
+				"kafkaLoaded": strings.TrimSpace(cfg.KafkaBrokers) != "",
+			},
 		})
 	})
 
