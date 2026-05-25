@@ -25,6 +25,8 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/vo"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
+	probecomm "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/common/v1"
+	localapiv1 "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/local-api/v1"
 )
 
 type Config struct {
@@ -73,10 +75,10 @@ type InterceptParam struct {
 }
 
 type DetectOutput struct {
-	App       string `json:"app"`
-	Status    string `json:"status"`
+	App       int32  `json:"app"`
+	Status    int32  `json:"status"`
 	Error     string `json:"error"`
-	RawResult string `json:"rawResult"`
+	RawResult string `json:"raw_result"`
 }
 
 type ExecResult struct {
@@ -708,7 +710,7 @@ func buildNodeMessage(in TaskCreateRequest, code int, msg, raw string, output De
 		EventType: 13,
 		MessageID: fmt.Sprintf("lite-%d-%d", time.Now().UnixMilli(), rand.Intn(100000)),
 		Timestamp: time.Now().UnixMilli(),
-		NodeID:    appType,
+		NodeID:    normalizeAppTypeName(appType),
 		TaskMeta:  rawOrNil(in.TaskMeta),
 		MsgStatus: 2,
 		EventData: map[string]any{
@@ -722,6 +724,33 @@ func buildNodeMessage(in TaskCreateRequest, code int, msg, raw string, output De
 			},
 		},
 	}
+}
+
+func appTypeToEnumValue(appType string) int32 {
+	v := strings.ToUpper(strings.TrimSpace(appType))
+	switch v {
+	case "INTERCEPT_APP_TYPE_CHROME", "CHROME":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_CHROME)
+	case "INTERCEPT_APP_TYPE_MI", "MI":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_MI)
+	case "INTERCEPT_APP_TYPE_EDGE", "EDGE":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_EDGE)
+	case "INTERCEPT_APP_TYPE_360", "360":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_360)
+	case "INTERCEPT_APP_TYPE_UC", "UC":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UC)
+	case "INTERCEPT_APP_TYPE_QUARK", "QUARK":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QUARK)
+	case "INTERCEPT_APP_TYPE_QQ", "QQ":
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_QQ)
+	default:
+		return int32(probecomm.InterceptAppType_INTERCEPT_APP_TYPE_UNKNOWN)
+	}
+}
+
+func normalizeAppTypeName(appType string) string {
+	v := probecomm.InterceptAppType(appTypeToEnumValue(appType))
+	return v.String()
 }
 
 func rawOrNil(v json.RawMessage) any {
@@ -786,6 +815,8 @@ func main() {
 	flag.Parse()
 
 	loadKafkaFromNacos(cfg)
+	appEnum := appTypeToEnumValue(cfg.AppType)
+	appTypeName := normalizeAppTypeName(cfg.AppType)
 	defaultBrokers := parseBrokers(cfg.KafkaBrokers)
 	inBrokers := parseBrokers(cfg.KafkaInBrokers)
 	outBrokers := parseBrokers(cfg.KafkaOutBrokers)
@@ -841,7 +872,7 @@ func main() {
 				}
 				var p InterceptParam
 				if err := json.Unmarshal([]byte(in.PayloadJSON), &p); err != nil || strings.TrimSpace(p.URL) == "" {
-					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: "invalid payloadJson", RawResult: ""}, cfg.AppType)
+					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: appEnum, Status: int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL), Error: "invalid payloadJson", RawResult: ""}, appTypeName)
 					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
@@ -850,15 +881,15 @@ func main() {
 				blocked, detail, err := rt.detect(p.URL)
 				cancel()
 				if err != nil {
-					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: err.Error(), RawResult: detail}, cfg.AppType)
+					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: appEnum, Status: int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL), Error: err.Error(), RawResult: detail}, appTypeName)
 					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
-				status := "NORMAL"
+				status := int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL)
 				if blocked {
-					status = "BLOCKED"
+					status = int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_BLOCKED)
 				}
-				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: cfg.AppType, Status: status, Error: "", RawResult: detail}, cfg.AppType)
+				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: appEnum, Status: status, Error: "", RawResult: detail}, appTypeName)
 				publishResult(outClient, cfg.KafkaOutTopic, out)
 			})
 		}
