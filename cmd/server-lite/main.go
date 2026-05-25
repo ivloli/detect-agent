@@ -553,6 +553,22 @@ func parseBrokers(raw string) []string {
 	return out
 }
 
+func toStringSlice(value any) []string {
+	arr, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		entry := strings.TrimSpace(fmt.Sprintf("%v", item))
+		if entry == "" || entry == "%!v(<nil>)" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func loadKafkaFromNacos(cfg *Config) {
 	cfg.NacosLoadTried = false
 	cfg.NacosLoadOK = false
@@ -606,12 +622,19 @@ func loadKafkaFromNacos(cfg *Config) {
 		cfg.NacosLoadError = "missing kafka section in nacos config"
 		return
 	}
-	if arr, ok := kv["brokers"].([]any); ok {
-		bs := make([]string, 0, len(arr))
-		for _, x := range arr {
-			bs = append(bs, fmt.Sprintf("%v", x))
-		}
-		cfg.KafkaBrokers = strings.Join(bs, ",")
+	brokers := toStringSlice(kv["brokers"])
+	boceBrokers := toStringSlice(kv["boce_brokers"])
+	if len(brokers) > 0 {
+		cfg.KafkaBrokers = strings.Join(brokers, ",")
+	}
+	if cfg.KafkaInBrokers == "" && len(brokers) > 0 {
+		cfg.KafkaInBrokers = strings.Join(brokers, ",")
+	}
+	if cfg.KafkaHeartbeatBrokers == "" && len(brokers) > 0 {
+		cfg.KafkaHeartbeatBrokers = strings.Join(brokers, ",")
+	}
+	if cfg.KafkaOutBrokers == "" && len(boceBrokers) > 0 {
+		cfg.KafkaOutBrokers = strings.Join(boceBrokers, ",")
 	}
 	if cfg.KafkaGroup == "" {
 		cfg.KafkaGroup = fmt.Sprintf("%v", kv["group"])
@@ -892,6 +915,20 @@ func main() {
 			"inBrokers":        inBrokers,
 			"outBrokers":       outBrokers,
 			"heartbeatBrokers": hbBrokers,
+			"kafkaRouting": map[string]any{
+				"input": map[string]any{
+					"topic":   cfg.KafkaInTopic,
+					"brokers": inBrokers,
+				},
+				"output": map[string]any{
+					"topic":   cfg.KafkaOutTopic,
+					"brokers": outBrokers,
+				},
+				"heartbeat": map[string]any{
+					"topic":   cfg.KafkaHeartbeatTopic,
+					"brokers": hbBrokers,
+				},
+			},
 			"nacos": map[string]any{
 				"addr":       cfg.NacosAddr,
 				"namespace":  cfg.NacosNamespace,
