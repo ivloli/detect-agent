@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -590,9 +591,15 @@ func loadKafkaFromNacos(cfg *Config) {
 	}
 	content, err := client.GetConfig(vo.ConfigParam{DataId: cfg.NacosDataID, Group: cfg.NacosGroup})
 	if err != nil {
-		log.Printf("[server-lite] nacos get config failed: %v", err)
-		cfg.NacosLoadError = fmt.Sprintf("get config failed: %v", err)
-		return
+		sdkErr := err
+		log.Printf("[server-lite] nacos sdk get config failed: %v", sdkErr)
+		content, err = getConfigByV1API(cfg)
+		if err != nil {
+			cfg.NacosLoadError = fmt.Sprintf("sdk and v1 api both failed, sdkErr=%v, v1Err=%v", sdkErr, err)
+			log.Printf("[server-lite] nacos v1 api get config failed: %v", err)
+			return
+		}
+		log.Printf("[server-lite] nacos loaded via v1 api fallback")
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(content), &m); err != nil {
@@ -637,6 +644,94 @@ func clip(s string, n int) string {
 	return s[:n] + "..."
 }
 
+func getConfigByV1API(cfg *Config) (string, error) {
+	baseURL, err := nacosBaseURL(cfg.NacosAddr, cfg.NacosScheme)
+	if err != nil {
+		return "", err
+	}
+
+	hc := &http.Client{Timeout: 5 * time.Second}
+	form := url.Values{}
+	form.Set("username", cfg.NacosUser)
+	form.Set("password", cfg.NacosPass)
+
+	loginReq, err := http.NewRequest(http.MethodPost, baseURL+"/nacos/v1/auth/users/login", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	loginResp, err := hc.Do(loginReq)
+	if err != nil {
+		return "", err
+	}
+	defer loginResp.Body.Close()
+
+	loginBody, err := io.ReadAll(loginResp.Body)
+	if err != nil {
+		return "", err
+	}
+	if loginResp.StatusCode < 200 || loginResp.StatusCode >= 300 {
+		return "", fmt.Errorf("v1 login failed: status=%d body=%s", loginResp.StatusCode, clip(string(loginBody), 256))
+	}
+
+	var loginResult struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := json.Unmarshal(loginBody, &loginResult); err != nil {
+		return "", fmt.Errorf("decode v1 login response failed: %w", err)
+	}
+	if strings.TrimSpace(loginResult.AccessToken) == "" {
+		return "", fmt.Errorf("empty accessToken in v1 login response")
+	}
+
+	query := url.Values{}
+	query.Set("tenant", cfg.NacosNamespace)
+	query.Set("group", cfg.NacosGroup)
+	query.Set("dataId", cfg.NacosDataID)
+	query.Set("accessToken", loginResult.AccessToken)
+
+	configReq, err := http.NewRequest(http.MethodGet, baseURL+"/nacos/v1/cs/configs?"+query.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+
+	configResp, err := hc.Do(configReq)
+	if err != nil {
+		return "", err
+	}
+	defer configResp.Body.Close()
+
+	configBody, err := io.ReadAll(configResp.Body)
+	if err != nil {
+		return "", err
+	}
+	if configResp.StatusCode < 200 || configResp.StatusCode >= 300 {
+		return "", fmt.Errorf("v1 get config failed: status=%d body=%s", configResp.StatusCode, clip(string(configBody), 256))
+	}
+
+	content := strings.TrimSpace(string(configBody))
+	if content == "" {
+		return "", fmt.Errorf("empty nacos config content")
+	}
+	return content, nil
+}
+
+func nacosBaseURL(rawAddr, scheme string) (string, error) {
+	if strings.TrimSpace(scheme) == "" {
+		scheme = "http"
+	}
+	parts := strings.Split(rawAddr, ",")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return "", fmt.Errorf("invalid nacos addr: %s", rawAddr)
+	}
+	hostPort := strings.TrimSpace(parts[0])
+	if !strings.Contains(hostPort, ":") {
+		return "", fmt.Errorf("invalid nacos addr: %s", rawAddr)
+	}
+	return fmt.Sprintf("%s://%s", scheme, hostPort), nil
+}
+
 func buildServerConfigs(rawAddr, scheme string) ([]constant.ServerConfig, error) {
 	if strings.TrimSpace(rawAddr) == "" {
 		return nil, fmt.Errorf("empty nacos addr")
@@ -651,7 +746,7 @@ func buildServerConfigs(rawAddr, scheme string) ([]constant.ServerConfig, error)
 		if h == "" || pt <= 0 {
 			continue
 		}
-		sc := constant.NewServerConfig(h, uint64(pt), constant.WithScheme(scheme))
+		sc := constant.NewServerConfig(h, uint64(pt), constant.WithScheme(scheme), constant.WithContextPath("/nacos"))
 		out = append(out, *sc)
 	}
 	if len(out) == 0 {
