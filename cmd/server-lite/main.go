@@ -29,6 +29,7 @@ import (
 
 type Config struct {
 	Listen string
+	AppType string
 
 	NacosAddr      string
 	NacosScheme    string
@@ -616,7 +617,11 @@ func loadKafkaFromNacos(cfg *Config) {
 		cfg.KafkaGroup = fmt.Sprintf("%v", kv["group"])
 	}
 	if cfg.KafkaInTopic == "" {
-		cfg.KafkaInTopic = fmt.Sprintf("%v", kv["intercept_detect_chrome_topic"])
+		if value := strings.TrimSpace(fmt.Sprintf("%v", kv["intercept_detect_mi_topic"])); value != "" && value != "%!v(<nil>)" {
+			cfg.KafkaInTopic = value
+		} else {
+			cfg.KafkaInTopic = fmt.Sprintf("%v", kv["intercept_detect_chrome_topic"])
+		}
 	}
 	if cfg.KafkaOutTopic == "" {
 		cfg.KafkaOutTopic = fmt.Sprintf("%v", kv["intercept_detect_result_topic"])
@@ -727,6 +732,7 @@ func newKafkaClient(brokers []string, user, pass string, consumeTopic string, gr
 func main() {
 	cfg := &Config{}
 	flag.StringVar(&cfg.Listen, "listen", ":19080", "http listen")
+	flag.StringVar(&cfg.AppType, "app-type", envOr("INTERCEPT_APP_TYPE", "INTERCEPT_APP_TYPE_MI"), "intercept app type")
 	flag.StringVar(&cfg.NacosAddr, "nacos-addr", envOr("NACOS_ADDR", ""), "nacos host:port[,host:port]")
 	flag.StringVar(&cfg.NacosScheme, "nacos-scheme", envOr("NACOS_SCHEME", "http"), "nacos scheme: http|https")
 	flag.StringVar(&cfg.NacosUser, "nacos-user", envOr("NACOS_USER", "nacos"), "nacos username")
@@ -809,7 +815,7 @@ func main() {
 				}
 				var p InterceptParam
 				if err := json.Unmarshal([]byte(in.PayloadJSON), &p); err != nil || strings.TrimSpace(p.URL) == "" {
-					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: cfg.Package, Status: "FAIL", Error: "invalid payloadJson", RawResult: ""})
+					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: "invalid payloadJson", RawResult: ""})
 					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
@@ -818,7 +824,7 @@ func main() {
 				blocked, detail, err := rt.detect(p.URL)
 				cancel()
 				if err != nil {
-					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: cfg.Package, Status: "FAIL", Error: err.Error(), RawResult: detail})
+					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: cfg.AppType, Status: "FAIL", Error: err.Error(), RawResult: detail})
 					publishResult(outClient, cfg.KafkaOutTopic, out)
 					return
 				}
@@ -826,7 +832,7 @@ func main() {
 				if blocked {
 					status = "BLOCKED"
 				}
-				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: cfg.Package, Status: status, Error: "", RawResult: detail})
+				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: cfg.AppType, Status: status, Error: "", RawResult: detail})
 				publishResult(outClient, cfg.KafkaOutTopic, out)
 			})
 		}
@@ -845,7 +851,7 @@ func main() {
 					Timestamp:  time.Now().UTC().Format(time.RFC3339),
 					NodeDetails: []map[string]any{
 						{
-							"appName": "INTERCEPT_APP_TYPE_CHROME",
+							"appName": cfg.AppType,
 							"appNum":  1,
 						},
 					},
