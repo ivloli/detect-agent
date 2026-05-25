@@ -649,6 +649,9 @@ func loadKafkaFromNacos(cfg *Config) {
 	if cfg.KafkaOutTopic == "" {
 		cfg.KafkaOutTopic = fmt.Sprintf("%v", kv["intercept_detect_result_topic"])
 	}
+	if cfg.KafkaHeartbeatTopic == "" {
+		cfg.KafkaHeartbeatTopic = fmt.Sprintf("%v", kv["heartbeat_report_topic"])
+	}
 	cfg.NacosLoadOK = true
 	log.Printf("[server-lite] kafka loaded from nacos brokers=%s in=%s out=%s group=%s", cfg.KafkaBrokers, cfg.KafkaInTopic, cfg.KafkaOutTopic, cfg.KafkaGroup)
 }
