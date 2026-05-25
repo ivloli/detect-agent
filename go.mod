@@ -15,7 +15,6 @@ require (
 	gitlab.gainetics.io/backend-cdn/go-protos/probe-executor v1.5.4
 	gitlab.gainetics.io/shared/go-common/go-nacos-cli v0.0.7
 	gitlab.gainetics.io/shared/go-common/zap-kratos-log v0.0.7
-	gitlab.gainetics.io/shared/proto-hub/cloud-iam v0.4.2
 	gitlab.gainetics.io/shared/proto-hub/common v0.0.19
 	gitlab.gainetics.io/shared/proto-hub/observable/batch v1.7.0
 	go.opentelemetry.io/otel v1.39.0
@@ -25,7 +24,6 @@ require (
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90
 	google.golang.org/genproto/googleapis/api v0.0.0-20260226221140-a57be14db171
-	google.golang.org/grpc v1.79.1
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -69,6 +67,7 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260217215200-42d3e9bedb6d // indirect
+	google.golang.org/grpc v1.79.1 // indirect
 	gopkg.in/ini.v1 v1.42.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
