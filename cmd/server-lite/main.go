@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,13 +20,19 @@ import (
 	"sync"
 	"time"
 
+	kratosnacos "github.com/go-kratos/kratos/contrib/registry/nacos/v2"
+	"github.com/go-kratos/kratos/v2"
+	"github.com/go-kratos/kratos/v2/registry"
+	"github.com/go-kratos/kratos/v2/transport"
 	"github.com/gorilla/websocket"
 	"github.com/nacos-group/nacos-sdk-go/clients"
+	"github.com/nacos-group/nacos-sdk-go/clients/naming_client"
 	"github.com/nacos-group/nacos-sdk-go/common/constant"
 	"github.com/nacos-group/nacos-sdk-go/vo"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	probecomm "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/common/v1"
+	ctrlplanev1 "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/control-plane/v1"
 	localapiv1 "gitlab.gainetics.io/backend-cdn/go-protos/probe-executor/local-api/v1"
 )
 
@@ -63,9 +70,9 @@ type Config struct {
 }
 
 type TaskCreateRequest struct {
-	TimeoutSec  int             `json:"timeout_sec"`
+	TimeoutSec  int32           `json:"timeout_sec"`
 	Deadline    string          `json:"deadline"`
-	Type        string          `json:"type"`
+	Type        int32           `json:"type"`
 	PayloadJSON string          `json:"payload_json"`
 	TaskMeta    json.RawMessage `json:"task_meta"`
 }
@@ -726,6 +733,46 @@ func buildNodeMessage(in TaskCreateRequest, code int, msg, raw string, output De
 	}
 }
 
+func fromPBTaskCreateRequest(in *ctrlplanev1.TaskCreateRequest) TaskCreateRequest {
+	deadline := ""
+	if in.GetDeadline() != nil {
+		deadline = in.GetDeadline().AsTime().UTC().Format(time.RFC3339)
+	}
+	taskMeta := json.RawMessage{}
+	if in.GetTaskMeta() != nil {
+		if b, err := json.Marshal(in.GetTaskMeta()); err == nil {
+			taskMeta = b
+		}
+	}
+	return TaskCreateRequest{
+		TimeoutSec:  in.GetTimeoutSec(),
+		Deadline:    deadline,
+		Type:        int32(in.GetType()),
+		PayloadJSON: in.GetPayloadJson(),
+		TaskMeta:    taskMeta,
+	}
+}
+
+func resolveTimeoutSeconds(in *ctrlplanev1.TaskCreateRequest, fallback int) int {
+	if in.GetTimeoutSec() > 0 {
+		return int(in.GetTimeoutSec())
+	}
+	if in.GetDeadline() != nil {
+		d := time.Until(in.GetDeadline().AsTime())
+		if d > 0 {
+			seconds := int(d.Seconds())
+			if seconds <= 0 {
+				return 1
+			}
+			return seconds
+		}
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	return 10
+}
+
 func appTypeToEnumValue(appType string) int32 {
 	v := strings.ToUpper(strings.TrimSpace(appType))
 	switch v {
@@ -784,6 +831,314 @@ func newKafkaClient(brokers []string, user, pass string, consumeTopic string, gr
 	return kgo.NewClient(opts...)
 }
 
+type LiteServer struct {
+	cfg *Config
+	rt  *Runtime
+
+	inClient  *kgo.Client
+	outClient *kgo.Client
+	hbClient  *kgo.Client
+
+	inBrokers  []string
+	outBrokers []string
+	hbBrokers  []string
+
+	appEnum     int32
+	appTypeName string
+
+	httpSrv *http.Server
+
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func NewLiteServer(cfg *Config) (*LiteServer, error) {
+	defaultBrokers := parseBrokers(cfg.KafkaBrokers)
+	inBrokers := parseBrokers(cfg.KafkaInBrokers)
+	outBrokers := parseBrokers(cfg.KafkaOutBrokers)
+	hbBrokers := parseBrokers(cfg.KafkaHeartbeatBrokers)
+	if len(inBrokers) == 0 {
+		inBrokers = defaultBrokers
+	}
+	if len(outBrokers) == 0 {
+		outBrokers = defaultBrokers
+	}
+	if len(hbBrokers) == 0 {
+		hbBrokers = inBrokers
+	}
+
+	if len(inBrokers) == 0 || cfg.KafkaInTopic == "" || cfg.KafkaOutTopic == "" {
+		return nil, fmt.Errorf("kafka config missing: inBrokers=%v inTopic=%q outTopic=%q", inBrokers, cfg.KafkaInTopic, cfg.KafkaOutTopic)
+	}
+
+	inClient, err := newKafkaClient(inBrokers, cfg.KafkaUser, cfg.KafkaPass, cfg.KafkaInTopic, cfg.KafkaGroup)
+	if err != nil {
+		return nil, fmt.Errorf("new kafka input client failed: %w", err)
+	}
+	outClient, err := newKafkaClient(outBrokers, cfg.KafkaUser, cfg.KafkaPass, "", "")
+	if err != nil {
+		inClient.Close()
+		return nil, fmt.Errorf("new kafka output client failed: %w", err)
+	}
+	hbClient, err := newKafkaClient(hbBrokers, cfg.KafkaUser, cfg.KafkaPass, "", "")
+	if err != nil {
+		inClient.Close()
+		outClient.Close()
+		return nil, fmt.Errorf("new kafka heartbeat client failed: %w", err)
+	}
+
+	rt := &Runtime{cfg: cfg, busy: map[string]bool{}}
+	appTypeName := normalizeAppTypeName(cfg.AppType)
+
+	ls := &LiteServer{
+		cfg:         cfg,
+		rt:          rt,
+		inClient:    inClient,
+		outClient:   outClient,
+		hbClient:    hbClient,
+		inBrokers:   inBrokers,
+		outBrokers:  outBrokers,
+		hbBrokers:   hbBrokers,
+		appEnum:     appTypeToEnumValue(cfg.AppType),
+		appTypeName: appTypeName,
+	}
+	ls.httpSrv = ls.newHTTPServer()
+	return ls, nil
+}
+
+func (s *LiteServer) Kind() transport.Kind {
+	return "server-lite"
+}
+
+func (s *LiteServer) Endpoint() (*url.URL, error) {
+	host := strings.TrimSpace(s.cfg.Listen)
+	if host == "" {
+		host = ":19080"
+	}
+	if strings.HasPrefix(host, ":") {
+		host = "127.0.0.1" + host
+	}
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		return nil, fmt.Errorf("invalid listen address %q: %w", s.cfg.Listen, err)
+	}
+	return &url.URL{Scheme: "http", Host: host}, nil
+}
+
+func (s *LiteServer) Start(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.consumeLoop(runCtx)
+	}()
+
+	if strings.TrimSpace(s.cfg.KafkaHeartbeatTopic) != "" && len(s.hbBrokers) > 0 {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.heartbeatLoop(runCtx)
+		}()
+	}
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("http server stopped with error: %v", err)
+		}
+	}()
+
+	log.Printf("server-lite up listen=%s package=%s serial=%s port=%d maxTabs=%d", s.cfg.Listen, s.cfg.Package, s.cfg.Serial, s.cfg.Port, s.cfg.MaxTabs)
+	log.Printf("kafka in=%s out=%s hb=%s", s.cfg.KafkaInTopic, s.cfg.KafkaOutTopic, s.cfg.KafkaHeartbeatTopic)
+	log.Printf("kafka brokers in=%v out=%v hb=%v", s.inBrokers, s.outBrokers, s.hbBrokers)
+	return nil
+}
+
+func (s *LiteServer) Stop(ctx context.Context) error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	_ = s.httpSrv.Shutdown(ctx)
+	s.inClient.Close()
+	s.outClient.Close()
+	s.hbClient.Close()
+	s.wg.Wait()
+	return nil
+}
+
+func (s *LiteServer) consumeLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		fetches := s.inClient.PollFetches(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if errs := fetches.Errors(); len(errs) > 0 {
+			for _, e := range errs {
+				log.Printf("kafka poll error: %v", e)
+			}
+			continue
+		}
+		fetches.EachRecord(func(r *kgo.Record) {
+			var inPB ctrlplanev1.TaskCreateRequest
+			if err := json.Unmarshal(r.Value, &inPB); err != nil {
+				log.Printf("invalid task json: %v", err)
+				return
+			}
+			in := fromPBTaskCreateRequest(&inPB)
+			var p InterceptParam
+			if err := json.Unmarshal([]byte(inPB.GetPayloadJson()), &p); err != nil || strings.TrimSpace(p.URL) == "" {
+				out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: s.appEnum, Status: int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL), Error: "invalid payloadJson", RawResult: ""}, s.appTypeName)
+				publishResult(s.outClient, s.cfg.KafkaOutTopic, out)
+				return
+			}
+			timeoutSec := resolveTimeoutSeconds(&inPB, s.cfg.TimeoutS)
+			detectCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+			_ = detectCtx
+			blocked, detail, err := s.rt.detect(p.URL)
+			cancel()
+			if err != nil {
+				out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: s.appEnum, Status: int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL), Error: err.Error(), RawResult: detail}, s.appTypeName)
+				publishResult(s.outClient, s.cfg.KafkaOutTopic, out)
+				return
+			}
+			status := int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL)
+			if blocked {
+				status = int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_BLOCKED)
+			}
+			out := buildNodeMessage(in, 200, "", "", DetectOutput{App: s.appEnum, Status: status, Error: "", RawResult: detail}, s.appTypeName)
+			publishResult(s.outClient, s.cfg.KafkaOutTopic, out)
+		})
+	}
+}
+
+func (s *LiteServer) heartbeatLoop(ctx context.Context) {
+	tk := time.NewTicker(30 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			hb := HeartbeatMessage{
+				ReportType: "INTERCEPT_REPORT_TYPE_HEARTBEAT",
+				NodeType:   "INTERCEPT_NODE_TYPE_BROWSER_FARM",
+				NodeName:   "server-lite",
+				PublicIPv4: "",
+				Timestamp:  time.Now().UTC().Format(time.RFC3339),
+				NodeDetails: []map[string]any{
+					{
+						"appName": s.cfg.AppType,
+						"appNum":  1,
+					},
+				},
+			}
+			b, _ := json.Marshal(hb)
+			rec := &kgo.Record{Topic: s.cfg.KafkaHeartbeatTopic, Key: []byte(fmt.Sprint(time.Now().UnixNano())), Value: b}
+			s.hbClient.Produce(context.Background(), rec, func(r *kgo.Record, err error) {
+				if err != nil {
+					log.Printf("heartbeat produce failed: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func (s *LiteServer) newHTTPServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		s.rt.mu.Lock()
+		defer s.rt.mu.Unlock()
+		err := s.rt.ensureForward()
+		if err != nil {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		tabs, _ := s.rt.listTabs()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":               true,
+			"serial":           s.rt.cfg.Serial,
+			"socket":           s.rt.socket,
+			"port":             s.rt.cfg.Port,
+			"maxTabs":          s.rt.cfg.MaxTabs,
+			"pageTabs":         countPages(tabs),
+			"inTopic":          s.cfg.KafkaInTopic,
+			"outTopic":         s.cfg.KafkaOutTopic,
+			"heartbeatTopic":   s.cfg.KafkaHeartbeatTopic,
+			"inBrokers":        s.inBrokers,
+			"outBrokers":       s.outBrokers,
+			"heartbeatBrokers": s.hbBrokers,
+			"kafkaRouting": map[string]any{
+				"input": map[string]any{
+					"topic":   s.cfg.KafkaInTopic,
+					"brokers": s.inBrokers,
+				},
+				"output": map[string]any{
+					"topic":   s.cfg.KafkaOutTopic,
+					"brokers": s.outBrokers,
+				},
+				"heartbeat": map[string]any{
+					"topic":   s.cfg.KafkaHeartbeatTopic,
+					"brokers": s.hbBrokers,
+				},
+			},
+			"nacos": map[string]any{
+				"addr":        s.cfg.NacosAddr,
+				"namespace":   s.cfg.NacosNamespace,
+				"group":       s.cfg.NacosGroup,
+				"dataId":      s.cfg.NacosDataID,
+				"loadTried":   s.cfg.NacosLoadTried,
+				"loadOK":      s.cfg.NacosLoadOK,
+				"loadError":   s.cfg.NacosLoadError,
+				"kafkaLoaded": strings.TrimSpace(s.cfg.KafkaBrokers) != "",
+			},
+		})
+	})
+
+	return &http.Server{Addr: s.cfg.Listen, Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second}
+}
+
+func newNacosNamingClient(cfg *Config) (naming_client.INamingClient, error) {
+	if strings.TrimSpace(cfg.NacosAddr) == "" {
+		return nil, fmt.Errorf("empty nacos addr")
+	}
+	sc, err := buildServerConfigs(cfg.NacosAddr, cfg.NacosScheme)
+	if err != nil {
+		return nil, err
+	}
+	cc := constant.ClientConfig{
+		NamespaceId:          cfg.NacosNamespace,
+		TimeoutMs:            5000,
+		NotLoadCacheAtStart:  true,
+		Username:             cfg.NacosUser,
+		Password:             cfg.NacosPass,
+		LogDir:               "/tmp/nacos/log",
+		CacheDir:             "/tmp/nacos/cache",
+		LogLevel:             "warn",
+		UpdateCacheWhenEmpty: true,
+	}
+	return clients.NewNamingClient(vo.NacosClientParam{ClientConfig: &cc, ServerConfigs: sc})
+}
+
+func newRegistrar(cfg *Config) (registry.Registrar, error) {
+	client, err := newNacosNamingClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	opts := []kratosnacos.Option{}
+	if strings.TrimSpace(cfg.NacosGroup) != "" {
+		opts = append(opts, kratosnacos.WithGroup(cfg.NacosGroup))
+	}
+	return kratosnacos.New(client, opts...), nil
+}
+
 func main() {
 	cfg := &Config{}
 	flag.StringVar(&cfg.Listen, "listen", ":19080", "http listen")
@@ -815,172 +1170,29 @@ func main() {
 	flag.Parse()
 
 	loadKafkaFromNacos(cfg)
-	appEnum := appTypeToEnumValue(cfg.AppType)
-	appTypeName := normalizeAppTypeName(cfg.AppType)
-	defaultBrokers := parseBrokers(cfg.KafkaBrokers)
-	inBrokers := parseBrokers(cfg.KafkaInBrokers)
-	outBrokers := parseBrokers(cfg.KafkaOutBrokers)
-	hbBrokers := parseBrokers(cfg.KafkaHeartbeatBrokers)
-	if len(inBrokers) == 0 {
-		inBrokers = defaultBrokers
-	}
-	if len(outBrokers) == 0 {
-		outBrokers = defaultBrokers
-	}
-	if len(hbBrokers) == 0 {
-		hbBrokers = inBrokers
-	}
-
-	if len(inBrokers) == 0 || cfg.KafkaInTopic == "" || cfg.KafkaOutTopic == "" {
-		log.Fatalf("kafka config missing: inBrokers=%v inTopic=%q outTopic=%q", inBrokers, cfg.KafkaInTopic, cfg.KafkaOutTopic)
-	}
-
-	rt := &Runtime{cfg: cfg, busy: map[string]bool{}}
-
-	inClient, err := newKafkaClient(inBrokers, cfg.KafkaUser, cfg.KafkaPass, cfg.KafkaInTopic, cfg.KafkaGroup)
+	srv, err := NewLiteServer(cfg)
 	if err != nil {
-		log.Fatalf("new kafka input client failed: %v", err)
+		log.Fatal(err)
 	}
-	defer inClient.Close()
-
-	outClient, err := newKafkaClient(outBrokers, cfg.KafkaUser, cfg.KafkaPass, "", "")
-	if err != nil {
-		log.Fatalf("new kafka output client failed: %v", err)
-	}
-	defer outClient.Close()
-
-	hbClient, err := newKafkaClient(hbBrokers, cfg.KafkaUser, cfg.KafkaPass, "", "")
-	if err != nil {
-		log.Fatalf("new kafka heartbeat client failed: %v", err)
-	}
-	defer hbClient.Close()
-
-	go func() {
-		for {
-			fetches := inClient.PollFetches(context.Background())
-			if errs := fetches.Errors(); len(errs) > 0 {
-				for _, e := range errs {
-					log.Printf("kafka poll error: %v", e)
-				}
-				continue
-			}
-			fetches.EachRecord(func(r *kgo.Record) {
-				var in TaskCreateRequest
-				if err := json.Unmarshal(r.Value, &in); err != nil {
-					log.Printf("invalid task json: %v", err)
-					return
-				}
-				var p InterceptParam
-				if err := json.Unmarshal([]byte(in.PayloadJSON), &p); err != nil || strings.TrimSpace(p.URL) == "" {
-					out := buildNodeMessage(in, 500, "invalid payloadJson", errString(err), DetectOutput{App: appEnum, Status: int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL), Error: "invalid payloadJson", RawResult: ""}, appTypeName)
-					publishResult(outClient, cfg.KafkaOutTopic, out)
-					return
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutS)*time.Second)
-				_ = ctx
-				blocked, detail, err := rt.detect(p.URL)
-				cancel()
-				if err != nil {
-					out := buildNodeMessage(in, 500, "detect failed", err.Error(), DetectOutput{App: appEnum, Status: int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_FAIL), Error: err.Error(), RawResult: detail}, appTypeName)
-					publishResult(outClient, cfg.KafkaOutTopic, out)
-					return
-				}
-				status := int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_NORMAL)
-				if blocked {
-					status = int32(localapiv1.InterceptDetectStatus_INTERCEPT_DETECT_STATUS_BLOCKED)
-				}
-				out := buildNodeMessage(in, 200, "", "", DetectOutput{App: appEnum, Status: status, Error: "", RawResult: detail}, appTypeName)
-				publishResult(outClient, cfg.KafkaOutTopic, out)
-			})
-		}
-	}()
-
-	if strings.TrimSpace(cfg.KafkaHeartbeatTopic) != "" && len(hbBrokers) > 0 {
-		go func() {
-			tk := time.NewTicker(30 * time.Second)
-			defer tk.Stop()
-			for {
-				hb := HeartbeatMessage{
-					ReportType: "INTERCEPT_REPORT_TYPE_HEARTBEAT",
-					NodeType:   "INTERCEPT_NODE_TYPE_BROWSER_FARM",
-					NodeName:   "server-lite",
-					PublicIPv4: "",
-					Timestamp:  time.Now().UTC().Format(time.RFC3339),
-					NodeDetails: []map[string]any{
-						{
-							"appName": cfg.AppType,
-							"appNum":  1,
-						},
-					},
-				}
-				b, _ := json.Marshal(hb)
-				rec := &kgo.Record{Topic: cfg.KafkaHeartbeatTopic, Key: []byte(fmt.Sprint(time.Now().UnixNano())), Value: b}
-				hbClient.Produce(context.Background(), rec, func(r *kgo.Record, err error) {
-					if err != nil {
-						log.Printf("heartbeat produce failed: %v", err)
-					}
-				})
-				<-tk.C
-			}
-		}()
+	var registrar registry.Registrar
+	if r, regErr := newRegistrar(cfg); regErr != nil {
+		log.Printf("skip nacos registrar: %v", regErr)
+	} else {
+		registrar = r
+		log.Printf("nacos registrar enabled: addr=%s group=%s namespace=%s", cfg.NacosAddr, cfg.NacosGroup, cfg.NacosNamespace)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		rt.mu.Lock()
-		defer rt.mu.Unlock()
-		err := rt.ensureForward()
-		if err != nil {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		tabs, _ := rt.listTabs()
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":               true,
-			"serial":           rt.cfg.Serial,
-			"socket":           rt.socket,
-			"port":             rt.cfg.Port,
-			"maxTabs":          rt.cfg.MaxTabs,
-			"pageTabs":         countPages(tabs),
-			"inTopic":          cfg.KafkaInTopic,
-			"outTopic":         cfg.KafkaOutTopic,
-			"heartbeatTopic":   cfg.KafkaHeartbeatTopic,
-			"inBrokers":        inBrokers,
-			"outBrokers":       outBrokers,
-			"heartbeatBrokers": hbBrokers,
-			"kafkaRouting": map[string]any{
-				"input": map[string]any{
-					"topic":   cfg.KafkaInTopic,
-					"brokers": inBrokers,
-				},
-				"output": map[string]any{
-					"topic":   cfg.KafkaOutTopic,
-					"brokers": outBrokers,
-				},
-				"heartbeat": map[string]any{
-					"topic":   cfg.KafkaHeartbeatTopic,
-					"brokers": hbBrokers,
-				},
-			},
-			"nacos": map[string]any{
-				"addr":       cfg.NacosAddr,
-				"namespace":  cfg.NacosNamespace,
-				"group":      cfg.NacosGroup,
-				"dataId":     cfg.NacosDataID,
-				"loadTried":  cfg.NacosLoadTried,
-				"loadOK":     cfg.NacosLoadOK,
-				"loadError":  cfg.NacosLoadError,
-				"kafkaLoaded": strings.TrimSpace(cfg.KafkaBrokers) != "",
-			},
-		})
-	})
-
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second}
-	log.Printf("server-lite up listen=%s package=%s serial=%s port=%d maxTabs=%d", cfg.Listen, cfg.Package, cfg.Serial, cfg.Port, cfg.MaxTabs)
-	log.Printf("kafka in=%s out=%s hb=%s", cfg.KafkaInTopic, cfg.KafkaOutTopic, cfg.KafkaHeartbeatTopic)
-	log.Printf("kafka brokers in=%v out=%v hb=%v", inBrokers, outBrokers, hbBrokers)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	appOpts := []kratos.Option{
+		kratos.Name("detect-agent-server-lite"),
+		kratos.Server(srv),
+	}
+	if registrar != nil {
+		appOpts = append(appOpts, kratos.Registrar(registrar))
+	}
+	app := kratos.New(
+		appOpts...,
+	)
+	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
